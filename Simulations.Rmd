@@ -1,0 +1,259 @@
+---
+title: "Simulations"
+author: "Tiger Zeng"
+date: "7/18/2022"
+output: html_document
+---
+
+# Simulations
+
+$X = (X_1, X_2, X_3, X_4, X_5) \sim N(0, I_5)$, $V = (X_1, X_2, X_3)$. Given $n$ samples, generate $S$ (participation probability) according to $P(S=1 | V) =  \rho(V) = 0.5$. In the source (target) population, set $\pi(x) = 0.3x_1 - 0.3x_3$ and simulate the treatment $A \sim \text{Bernoulli }(\pi(X))$. Consider linear potential outcome model
+
+\[
+\mu_1 (x) = 1.5x_1+x_4+1, \, \mu_0(x) = x_1
+\]
+
+and $Y = A\mu_1(X) + (1-A)\mu_0(X) + N(0,1)$. So we have
+
+\[
+\tau_1(v) = \mathbb{E}[\mu_1(X)|V] = 1.5x_1 +1, \tau_0(v) = x_1.
+\]
+
+And the effect is 1. The nuisance estimators are $\hat{\mu}_a(x) = \mu_a(x) + \epsilon_{1,n}, \hat{\tau}_a(v) = \tau_a(v) + \epsilon_{2,n}, \hat{\rho}(v) = \text{expit}(\text{logit}(\rho(v))+\epsilon_{3,n}), \hat{\pi}(x) = \text{expit}(\text{logit}(\pi(x))+\epsilon_{4,n})$, where $\epsilon_{i,n} \sim N(n^{-\alpha}, n^{-2\alpha})$.
+
+```{r echo=FALSE, message=FALSE}
+# Doubly robust transportation
+transport_dr_simu <- function(a, y, x_source, x_target, mu1_hat = NULL, mu0_hat = NULL, pi_hat = NULL, rho_hat = NULL, tau1_hat = NULL, tau0_hat = NULL){
+  n_source <- nrow(x_source)
+  n_target <- nrow(x_target)
+  muhat <- matrix(0, nrow=n_source, ncol=2)
+  pi_source <- numeric(length=n_source)
+  pi_treat <- numeric(length=n_source)
+  tau_source <- matrix(0, nrow=n_source, ncol=2)
+  tau_target <- matrix(0, nrow=n_target, ncol=2)
+  # estimate regression function
+  muhat[,1] <- mu0_hat(x_source)
+  muhat[,2] <- mu1_hat(x_source)
+  tau_source[,1] <- tau0_hat(x_source)
+  tau_source[,2] <- tau1_hat(x_source)
+  tau_target[,1] <- tau0_hat(cbind(x_target, matrix(0, nrow = n_target, ncol=2)))
+  tau_target[,2] <- tau1_hat(cbind(x_target, matrix(0, nrow = n_target, ncol=2)))
+  
+  # estimate propensity score into source
+  pi_source <- rho_hat(x_source)
+
+  # estimate propensity score of treatment in source data
+  pi_treat <- pi_hat(x_source)
+  
+  # Doubly robust estimation
+  ifs <- matrix(0, nrow=n_source + n_target, ncol=2)
+  for (aa in 1:2){
+    ifs[1:n_source,aa] <- as.numeric(a == aa-1)*(1-pi_source)*(y-muhat[,aa])/(pi_source*(pi_treat^(aa-1)*(1-pi_treat)^(2-aa))) + (1-pi_source)/pi_source*(muhat[,aa] - tau_source[,aa])
+    ifs[(n_source+1):(n_source+n_target),aa] <- tau_target[,aa]
+  }
+  ifs <- ifs/(n_target)*(n_target+n_source)
+  results <- matrix(0, nrow=2, ncol=3)
+  results[1,1:2] <- apply(ifs, 2, mean)
+  results[1,3] <- results[1,2] - results[1,1]
+  results[2,1:2] <- apply(ifs, 2, sd)/sqrt(n_source + n_target)
+  results[2,3] <- sd(ifs[,2]-ifs[,1])/sqrt(n_source + n_target)
+  return(results)
+}
+
+# Plug-in
+transport_plugin_simu <- function(a, y, x_source, x_target, tau1_hat = NULL, tau0_hat = NULL){
+  n_source <- nrow(x_source)
+  n_target <- nrow(x_target)
+  muhat <- matrix(0, nrow=n_source, ncol=2)
+  tau_target <- matrix(0, nrow=n_target, ncol=2)
+  tau_target[,1] <- tau0_hat(cbind(x_target, matrix(0, nrow = n_target, ncol=2)))
+  tau_target[,2] <- tau1_hat(cbind(x_target, matrix(0, nrow = n_target, ncol=2)))
+  potential_mean <- colMeans(tau_target)
+  return(potential_mean)
+}
+
+# Doubly robust generalization
+generalize_dr_simu <- function(a, y, x_source, x_target, mu1_hat = NULL, mu0_hat = NULL, pi_hat = NULL, rho_hat = NULL, tau1_hat = NULL, tau0_hat = NULL){
+  n_source <- nrow(x_source)
+  n_target <- nrow(x_target)
+  muhat <- matrix(0, nrow=n_source, ncol=2)
+  pi_source <- numeric(length=n_source)
+  pi_treat <- numeric(length=n_source)
+  tau_source <- matrix(0, nrow=n_source, ncol=2)
+  tau_target <- matrix(0, nrow=n_target, ncol=2)
+  # estimate regression function
+  muhat[,1] <- mu0_hat(x_source)
+  muhat[,2] <- mu1_hat(x_source)
+  tau_source[,1] <- tau0_hat(x_source)
+  tau_source[,2] <- tau1_hat(x_source)
+  tau_target[,1] <- tau0_hat(cbind(x_target, matrix(0, nrow = n_target, ncol=2)))
+  tau_target[,2] <- tau1_hat(cbind(x_target, matrix(0, nrow = n_target, ncol=2)))
+  # estimate propensity score into source
+  pi_source <- rho_hat(x_source)
+  # estimate propensity score of treatment in source data
+  pi_treat <- pi_hat(x_source)
+  
+  # Doubly robust estimation
+  ifs <- matrix(0, nrow=n_source + n_target, ncol=2)
+  for (aa in 1:2){
+    ifs[1:n_source,aa] <- as.numeric(a == aa-1)*(y-muhat[,aa])/(pi_source*(pi_treat^(aa-1)*(1-pi_treat)^(2-aa))) + 1/pi_source*(muhat[,aa] - tau_source[,aa]) + tau_source[,aa]
+    ifs[(n_source+1):(n_source+n_target),aa] <- tau_target[,aa]
+  }
+  results <- matrix(0, nrow=2, ncol=3)
+  results[1,1:2] <- apply(ifs, 2, mean)
+  results[1,3] <- results[1,2] - results[1,1]
+  results[2,1:2] <- apply(ifs, 2, sd)/sqrt(n_source + n_target)
+  results[2,3] <- sd(ifs[,2]-ifs[,1])/sqrt(n_source + n_target)
+  return(results)
+}
+
+logit <- function(x){
+  return(log(x/(1-x)))
+}
+
+expit <- function(x){
+  return(1/(1+exp(-x)))
+}
+
+
+f_hat <- function(beta, b, epsilon){
+  return(function(x) {
+    return(c(x %*% beta + b + epsilon))
+  })
+}
+
+prob_hat <- function(beta, b, epsilon){
+  return(function(x) {
+    return(expit(c(x %*% beta + b + epsilon)))
+  })
+}
+
+data_generator <- function(beta1_y, beta0_y, beta_pi, n, rho){
+  s <- rbinom(n, 1, rho)
+  n1 <- sum(s)
+  n2 <- n-n1
+  x_source <- matrix(rnorm(n1*5), ncol=5)
+  x_target <- matrix(rnorm(n2*3), ncol=3)
+  # x_target[,1] <- x_target[,1] + 1
+  colnames(x_source) <- paste0("X", 1:5)
+  colnames(x_target) <- paste0("X", 1:3)
+  a <- rbinom(n1, 1, expit(x_source %*% beta_pi))
+  y <- (1-a)*(x_source%*%beta0_y) + a*(x_source%*%beta1_y+1)+rnorm(n1)
+  return(list(a=a, y=c(y), x_source=x_source, x_target=x_target))
+}
+
+M <- 1000
+n <- 100
+rho <- 0.5
+alphas <- seq(from = 0.1, to = 0.5, by=0.05)
+beta1_y <- c(1.5, 0, 0, 1, 0)
+b <- 1
+beta0_y <- c(1, 0, 0, 0, 0)
+beta_pi <- c(0.3, 0, -0.3, 0, 0)
+results_dr <- matrix(0, ncol = M, nrow = length(alphas))
+results_plg <- matrix(0, ncol = M, nrow = length(alphas))
+set.seed(521)
+for(alpha in seq_along(alphas)){
+  for (m in 1:M){
+    #set.seed(alpha+m*100)
+    dat <- data_generator(beta1_y, beta0_y, beta_pi, n ,rho)
+    mu1_hat <- f_hat(beta1_y, b, rnorm(1, mean=n^(-alphas[alpha]), sd = n^(-alphas[alpha])))
+    mu0_hat <- f_hat(beta0_y, 0, rnorm(1, mean=n^(-alphas[alpha]), sd = n^(-alphas[alpha])))
+    rho_hat <- prob_hat(rep(0,5), 0, rnorm(1, mean=n^(-alphas[alpha]), sd = n^(-alphas[alpha])))
+    tau1_hat <- f_hat(c(1.5, 0, 0, 0, 0), 1, rnorm(1, mean=n^(-alphas[alpha]), sd = n^(-alphas[alpha])))
+    tau0_hat <- f_hat(c(1, 0, 0, 0, 0), 0, rnorm(1, mean=n^(-alphas[alpha]), sd = n^(-alphas[alpha])))
+    pi_hat <- prob_hat(beta_pi, 0, rnorm(1, mean=n^(-alphas[alpha]), sd = n^(-alphas[alpha])))
+    res_dr <- transport_dr_simu(dat$a, dat$y, dat$x_source, dat$x_target, mu1_hat=mu1_hat, mu0_hat=mu0_hat, rho_hat=rho_hat, tau1_hat=tau1_hat, tau0_hat=tau0_hat, pi_hat=pi_hat)
+    results_dr[alpha, m] <- res_dr[1,2]
+    res_plg <- transport_plugin_simu(dat$a, dat$y, dat$x_source, dat$x_target, tau1_hat = tau1_hat, tau0_hat = tau0_hat)
+    results_plg[alpha, m] <- res_plg[2]
+  }
+}
+dr1 <- sqrt(apply((results_dr-1)^2, 1, mean))
+plg1 <- sqrt(apply((results_plg-1)^2, 1, mean))
+plot(x = alphas, y = dr1, main = "n=100", ylim = range(c(dr1, plg1)), ylab = "RMSE", cex.lab=1.5, cex.axis=1.5, cex.main=1.5, cex.sub=1.5)
+lines(x = alphas, y = dr1)
+points(x = alphas, y = plg1, col = "red")
+lines(x = alphas, y = plg1, col = "red", lty=2)
+legend("topright", c("DR", "Plug-in"), lty=1:2, pch=c(1,1), col=c("black", "red"), cex=1.5)
+```
+
+```{r echo=FALSE}
+M <- 1000
+n <- 1000
+rho <- 0.5
+alphas <- seq(from = 0.1, to = 0.5, by=0.05)
+beta1_y <- c(1.5, 0, 0, 1, 0)
+b <- 1
+beta0_y <- c(1, 0, 0, 0, 0)
+beta_pi <- c(0.3, 0, -0.3, 0, 0)
+results_dr <- matrix(0, ncol = M, nrow = length(alphas))
+results_plg <- matrix(0, ncol = M, nrow = length(alphas))
+set.seed(521)
+for(alpha in seq_along(alphas)){
+  for (m in 1:M){
+    # set.seed(alpha*100+m*10)
+    dat <- data_generator(beta1_y, beta0_y, beta_pi, n ,rho)
+    mu1_hat <- f_hat(beta1_y, b, rnorm(1, mean=n^(-alphas[alpha]), sd = n^(-alphas[alpha])))
+    mu0_hat <- f_hat(beta0_y, 0, rnorm(1, mean=n^(-alphas[alpha]), sd = n^(-alphas[alpha])))
+    rho_hat <- prob_hat(rep(0,5), 0, rnorm(1, mean=n^(-alphas[alpha]), sd = n^(-alphas[alpha])))
+    tau1_hat <- f_hat(c(1.5, 0, 0, 0, 0), 1, rnorm(1, mean=n^(-alphas[alpha]), sd = n^(-alphas[alpha])))
+    tau0_hat <- f_hat(c(1, 0, 0, 0, 0), 0, rnorm(1, mean=n^(-alphas[alpha]), sd = n^(-alphas[alpha])))
+    pi_hat <- prob_hat(beta_pi, 0, rnorm(1, mean=n^(-alphas[alpha]), sd = n^(-alphas[alpha])))
+    res_dr <- transport_dr_simu(dat$a, dat$y, dat$x_source, dat$x_target, mu1_hat=mu1_hat, mu0_hat=mu0_hat, rho_hat=rho_hat, tau1_hat=tau1_hat, tau0_hat=tau0_hat, pi_hat=pi_hat)
+    results_dr[alpha, m] <- res_dr[1,2]
+    res_plg <- transport_plugin_simu(dat$a, dat$y, dat$x_source, dat$x_target, tau1_hat = tau1_hat, tau0_hat = tau0_hat)
+    results_plg[alpha, m] <- res_plg[2]
+  }
+}
+dr1 <- sqrt(apply((results_dr-1)^2, 1, mean))
+plg1 <- sqrt(apply((results_plg-1)^2, 1, mean))
+plot(x = alphas, y = dr1, main = "n=1000", ylim = range(c(dr1, plg1)), ylab = "RMSE", cex.lab=1.5, cex.axis=1.5, cex.main=1.5, cex.sub=1.5)
+lines(x = alphas, y = dr1)
+points(x = alphas, y = plg1, col = "red")
+lines(x = alphas, y = plg1, col = "red", lty=2)
+legend("topright", c("DR", "Plug-in"), lty=1:2, pch=c(1,1), col=c("black", "red"), cex=1.5)
+```
+
+```{r echo=FALSE}
+M <- 1000
+n <- 5000
+rho <- 0.5
+alphas <- seq(from = 0.1, to = 0.5, by=0.05)
+beta1_y <- c(1.5, 0, 0, 1, 0)
+b <- 1
+beta0_y <- c(1, 0, 0, 0, 0)
+beta_pi <- c(0.3, 0, -0.3, 0, 0)
+results_dr <- matrix(0, ncol = M, nrow = length(alphas))
+results_plg <- matrix(0, ncol = M, nrow = length(alphas))
+set.seed(521)
+for(alpha in seq_along(alphas)){
+  for (m in 1:M){
+    # set.seed(alpha*1000+m*10)
+    dat <- data_generator(beta1_y, beta0_y, beta_pi, n ,rho)
+    mu1_hat <- f_hat(beta1_y, b, rnorm(1, mean=n^(-alphas[alpha]), sd = n^(-alphas[alpha])))
+    mu0_hat <- f_hat(beta0_y, 0, rnorm(1, mean=n^(-alphas[alpha]), sd = n^(-alphas[alpha])))
+    rho_hat <- prob_hat(rep(0,5), 0, rnorm(1, mean=n^(-alphas[alpha]), sd = n^(-alphas[alpha])))
+    tau1_hat <- f_hat(c(1.5, 0, 0, 0, 0), 1, rnorm(1, mean=n^(-alphas[alpha]), sd = n^(-alphas[alpha])))
+    tau0_hat <- f_hat(c(1, 0, 0, 0, 0), 0, rnorm(1, mean=n^(-alphas[alpha]), sd = n^(-alphas[alpha])))
+    pi_hat <- prob_hat(beta_pi, 0, rnorm(1, mean=n^(-alphas[alpha]), sd = n^(-alphas[alpha])))
+    res_dr <- transport_dr_simu(dat$a, dat$y, dat$x_source, dat$x_target, mu1_hat=mu1_hat, mu0_hat=mu0_hat, rho_hat=rho_hat, tau1_hat=tau1_hat, tau0_hat=tau0_hat, pi_hat=pi_hat)
+    results_dr[alpha, m] <- res_dr[1,2]
+    res_plg <- transport_plugin_simu(dat$a, dat$y, dat$x_source, dat$x_target, tau1_hat = tau1_hat, tau0_hat = tau0_hat)
+    results_plg[alpha, m] <- res_plg[2]
+  }
+}
+dr1 <- sqrt(apply((results_dr-1)^2, 1, mean))
+plg1 <- sqrt(apply((results_plg-1)^2, 1, mean))
+plot(x = alphas, y = dr1, main = "n=5000", ylim = range(c(dr1, plg1)), ylab = "RMSE", cex.lab=1.5, cex.axis=1.5, cex.main=1.5, cex.sub=1.5)
+lines(x = alphas, y = dr1)
+points(x = alphas, y = plg1, col = "red")
+lines(x = alphas, y = plg1, col = "red", lty=2)
+legend("topright", c("DR", "Plug-in"), lty=1:2, pch=c(1,1), col=c("black", "red"), cex=1.5)
+```
+
+
+
+
+
+

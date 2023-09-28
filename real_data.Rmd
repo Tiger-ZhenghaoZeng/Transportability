@@ -1,0 +1,1347 @@
+---
+title: "Transporting the causal effects of dietary intake on adverse pregnancy outcomes"
+author: "Tiger Zeng"
+date: "4/16/2021"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+# Preprocessing variables
+
+```{r include=FALSE}
+library(readr)
+library(ggplot2)
+library(ranger)
+library(gbm)
+library(snowfall)
+library(SuperLearner)
+source('transport.R')
+library(npcausal)
+library(survey)
+library(Hmisc)
+numom_raw <- read_csv("~/Desktop/CMUtiger/2021 Spring/ADA/data/Numom.csv")
+nsfg_raw <- read.delim("~/Desktop/CMUtiger/2021 Spring/ADA/data/nsfg1517.txt")
+numom_raw <- numom_raw[!is.na(numom_raw$momeduc) & !is.na(numom_raw$momrace),]
+```
+
+```{r include=FALSE}
+# Preprocessing
+
+# Mom Education
+numom <- data.frame(numom_raw$momeduc)
+colnames(numom) <- c("momeduc")
+numom$momeduc <- as.factor(numom$momeduc)
+nsfg <- data.frame(nsfg_raw$HIEDUC)
+colnames(nsfg) <- c("momeduc")
+nsfg$momeduc[nsfg$momeduc>=5 & nsfg$momeduc<=8] <- 1
+nsfg$momeduc[nsfg$momeduc==9] <- 2
+nsfg$momeduc[nsfg$momeduc==10] <- 3
+nsfg$momeduc[nsfg$momeduc==11] <- 4
+nsfg$momeduc[nsfg$momeduc==12] <- 5
+nsfg$momeduc[nsfg$momeduc>12] <- 6
+nsfg$momeduc <- as.factor(nsfg$momeduc)
+
+# Mom Age, crreate missing indicators to deal with missing values
+numom$momage <- numom_raw$momage
+numom$age_NA <- ifelse(is.na(numom$momage), 1, 0)
+numom$momage[is.na(numom$momage)] <- mean(numom$momage, na.rm=T)
+numom$age_NA <- as.factor(numom$age_NA)
+
+nsfg$momage <- nsfg_raw$AGEPREG
+nsfg$age_NA <- ifelse(is.na(nsfg$momage), 1, 0)
+nsfg$momage[is.na(nsfg$momage)] <- mean(nsfg$momage, na.rm=T)
+nsfg$age_NA <- as.factor(nsfg$age_NA)
+
+
+# Mom race
+numom$momrace <- ifelse(numom_raw$momrace==5 & numom_raw$momhisp==0, 1, 0)
+numom$momrace[numom_raw$momrace==4 & numom_raw$momhisp==0] <- 2
+numom$momrace[numom_raw$momhisp==1] <- 3
+numom$momrace[numom$momrace==0] <- 4
+numom$momrace <- as.factor(numom$momrace)
+
+nsfg$momrace <- ifelse(nsfg_raw$HISPRACE2==2, 1, 0)
+nsfg$momrace[nsfg_raw$HISPRACE2==3] <- 2
+nsfg$momrace[nsfg_raw$HISPRACE2==1] <- 3
+nsfg$momrace[nsfg_raw$HISPRACE2==4] <- 4
+nsfg$momrace <- as.factor(nsfg$momrace)
+
+# Marital
+numom$marital <- numom_raw$marital
+numom$marital[numom$marital==".r"] <- NA
+numom$marital <- as.numeric(numom$marital)
+numom$marital[is.na(numom$marital)] <- 6
+numom$marital <- as.factor(numom$marital)
+
+nsfg$marital <- ifelse(nsfg_raw$FMARITAL==5, 1, 0)
+nsfg$marital[nsfg_raw$FMARITAL==1] <- 2
+nsfg$marital[nsfg_raw$FMARITAL==2] <- 3
+nsfg$marital[nsfg_raw$FMARITAL==3] <- 4
+nsfg$marital[nsfg_raw$FMARITAL==4] <- 5
+nsfg$marital[is.na(nsfg$marital)] <- 6
+nsfg$marital <- as.factor(nsfg$marital)
+
+# Insurance
+numom$insurance <- ifelse(numom_raw$insurance == 1, 1, 2)
+numom$insurance[numom_raw$insurance==4] <- 3
+numom$insurance[is.na(numom$insurance)] <- 4
+numom$insurance <- as.factor(numom$insurance)
+
+nsfg$insurance <- ifelse(nsfg_raw$CURR_INS==1, 1, 2)
+nsfg$insurance[nsfg_raw$CURR_INS==4] <- 3
+nsfg$insurance <- as.factor(nsfg$insurance)
+
+
+# Working status
+numom$work <- numom_raw$workyn
+numom$work[is.na(numom$work)] <- 2
+numom$work <- as.factor(numom$work)
+
+nsfg$work <- ifelse(nsfg_raw$LABORFOR <= 4, 1, 0)
+nsfg$work[is.na(nsfg$work)] <- 2
+nsfg$work <- as.factor(nsfg$work)
+
+# Smoking
+numom$smoke <- numom_raw$smokerpre
+numom$smoke[is.na(numom$smoke)] <- 2
+numom$smoke <- as.factor(numom$smoke)
+
+nsfg$smoke <- ifelse(nsfg_raw$PRIORSMK==0, 0, 1)
+nsfg$smoke[is.na(nsfg$smoke)] <- 2
+nsfg$smoke <- as.factor(nsfg$smoke)
+
+# Number smoked per day
+numom$num_cigs <- ifelse(numom_raw$cigsprepreg==0, 0, 1)
+numom$num_cigs[numom_raw$cigsprepreg==1] <- 1
+numom$num_cigs[numom_raw$cigsprepreg>=2 & numom_raw$cigsprepreg<=4] <- 2
+numom$num_cigs[numom_raw$cigsprepreg>=5 & numom_raw$cigsprepreg<=14] <- 3
+numom$num_cigs[numom_raw$cigsprepreg>=15 & numom_raw$cigsprepreg<=24] <- 4
+numom$num_cigs[numom_raw$cigsprepreg>=25 & numom_raw$cigsprepreg<=34] <- 5
+numom$num_cigs[numom_raw$cigsprepreg>=35] <- 6
+numom$num_cigs[is.na(numom$num_cigs)] <- 7
+numom$num_cigs <- as.factor(numom$num_cigs)
+
+nsfg$num_cigs <- nsfg_raw$PRIORSMK
+nsfg$num_cigs[nsfg$num_cigs>=8] <- NA
+nsfg$num_cigs[is.na(nsfg$num_cigs)] <- 7
+nsfg$num_cigs <- as.factor(nsfg$num_cigs)
+
+# Gestational age (not used any more)
+# numom$gestage <- numom_raw$gestage
+# numom$gestage[numom_raw$gestage<=13] <- 1
+# numom$gestage[numom_raw$gestage>14 & numom_raw$gestage <= 26] <- 2
+# numom$gestage[numom_raw$gestage>26 & numom_raw$gestage <34 ] <- 3
+# numom$gestage[numom_raw$gestage>=34 & numom_raw$gestage<=36] <- 4
+# numom$gestage[numom_raw$gestage>36 & numom_raw$gestage<=40] <- 5
+# numom$gestage[numom_raw$gestage>40] <- 6
+# numom$gestage <- as.factor(numom$gestage)
+
+# nsfg$gestage <- summary(nsfg_raw$GESTASUN_M)
+
+
+
+
+```
+
+
+Preprocessing the confounders. At this initial stage I consider confounders that are included in paper "Machine learning as a strategy to account for dietary synergy" or variables that both appear in two data sets. Missing indicator variables are created for each variable containing missing values. Then the missing value is replaced with mean (continuous) or majority (categorical).
+
+\begin{itemize}
+\item Mom Education: six categories: "Less than HS", "HS grad/GED", "Some college", "Assoc/Tech", "College", "Beyond college". View "master", "doctorate", "professional" degrees (in NSFG data) as "degree work beyond college" (numom).
+\item Mom Age: continuous. 3 missing in numom and 201 missing in NSFG.
+\item Mom race: Encode as "Non-Hispanic white", "Non-Hispanic black", "Hispanic", "Other".
+\item Marital: five categories: "Single", "Married", "Widowed", "Divorced", "Separated", "Missing". Encode according to numom. 
+\item Insurance: Encode as four categories (private (1), public (2), none (3), missing (4)). In numom, "Commerical" as "private" and "government", "military" as public. "Self-pay" as none. In NSFG, "private health insurance or Medi-Gap" as "private", "Medicaid, CHIP, or a state-sponsored health plan" and "Medicare, military health care, or other government health care" as "public", "a single-service plan, only by the Indian Health Service, or currently not covered by health insurance" as "none". No missing value. 
+\item Work: 1 if respondent has work otherwise 0. "Missing" is encoded as 2. In NSFG, "working full-time", "working part-time", "working temp", "work maternity" are encoded as 1. "not working", "school", "keep house", "care for family", "other" are encoded as 0.
+\item Smoking: Binary (7000+ missing values in NSFG). 
+\item Number of cigs: How many cigarettes one smoked per day before pregnancy. "None" to 0. "About one cigarette or less" to 1. "2-4" to 2. "5-14" to 3. "15-24" to 4. "25-34" to 5. ">35" to 6. "Missing" to 7.
+
+\end{itemize}
+
+And some variables that only appear in numom data set.
+\begin{itemize}
+\item BMI: 90 missing values are imputed and missing indicator is created.
+\item Other dietary components: beans veggies, whole grains, dairy products, total
+protein foods, seafood and plant proteins, fatty acids, refined
+grains, sodium, and “empty” calories. We have two covariates for each of them. One is continuous and the other is discrete indicating whether the continuous variable is greater than 80\% quantile. For a dietary component (e.g. fruit), when it is considered as a treatment I use the discrete one and when it is considered as confounder I use the continuous one. These components are potential treatments so I did not impute them.
+\end{itemize}
+
+
+
+# Assess Difference in Covariates Distributions and Treatment Effects
+
+All imputed missing values are omitted.
+
+```{r echo=FALSE}
+# Classification method to check similarity, if it's easy to differentiate between source dataset and target dataset we should assume an obvious difference in the covariate distribution
+# Not presented, can be ignored
+numom$trial <- 1
+nsfg$trial <- 0
+preg_data <- rbind(numom, nsfg)
+preg_data$trial <- as.factor(preg_data$trial)
+levels(preg_data$momeduc) <- c("Less than HS", "HS grad/GED", "Some college", "Assoc/Tech", "College", "Beyond college")
+levels(preg_data$momrace) <- c("Non-Hispanic white", "Non-Hispanic black", "Hispanic", "Other")
+levels(preg_data$insurance) <- c("Private", "Public", "None", "Missing")
+levels(preg_data$marital) <- c("Single", "Married", "Widowed", "Divorced", "Separated", "Missing")
+levels(preg_data$work) <- c("No", "Yes", "Missing")
+levels(preg_data$smoke) <- c("No", "Yes", "Missing")
+levels(preg_data$num_cigs) <- c("0", "1", "2-4", "5-14", "15-24", "25-34", "More than 34", "Missing")
+levels(preg_data$trial) <- c("NSFG", "Numom")
+
+
+```
+
+## Classification 
+
+```{r include=FALSE}
+# Logistic Regression
+glm_fit1 <- glm(trial ~ ., data=preg_data, family="binomial")
+fit1 <- predict(glm_fit1, newdata=preg_data, type="response")
+yfit1 <- ifelse(fit1 > 0.5, 1, 0)
+mean(yfit1 != (as.numeric(preg_data$trial)-1))
+
+# Random Forests
+rf1 <- ranger(trial ~ ., data = preg_data, respect.unordered.factors = "order", seed = 123)
+1-rf1$prediction.error
+
+# GBM
+preg_data1 <- preg_data
+preg_data1$trial <- ifelse(preg_data1$trial=="Numom", 1, 0)
+gbm1 <- gbm(trial ~ ., data=preg_data1, n.trees=500, interaction.depth=3)
+yfit <- ifelse(exp(gbm1$fit)/(1+exp(gbm1$fit))>0.5, 1, 0)
+1-mean(yfit!=preg_data1$trial)
+```
+
+Create a joint data set with Numom and NSFG observations and use logistic regression to predict whether each observation comes from Numom (trial) or NSFG (target) data.  The training accuracy of different methods is summarized as follows 
+
+```{r include=FALSE}
+A <- matrix(0, nrow=1, ncol=3)
+colnames(A) <- c("Logistic Regression", "Random Forests", "GBM")
+A[1,1] <- 0.889
+A[1,2] <- 0.895
+A[1,3] <- 0.896
+```
+
+```{r echo=FALSE}
+knitr::kable(A)
+```
+
+
+
+```{r}
+# Levels of other covariates
+levels(numom$momeduc) <- c("Less than HS", "HS grad/GED", "Some college", "Assoc/Tech", "College", "Beyond college")
+levels(numom$momrace) <- c("Non-Hispanic white", "Non-Hispanic black", "Hispanic", "Other")
+levels(numom$insurance) <- c("Private", "Public",  "None", "Missing")
+levels(numom$marital) <- c("Single", "Married", "Widowed", "Divorced", "Separated", "Missing")
+levels(numom$work) <- c("No", "Yes", "Missing")
+levels(numom$smoke) <- c("No", "Yes", "Missing")
+levels(numom$num_cigs) <- c("0", "1", "2-4", "5-14", "15-24", "25-34", "More than 34", "Missing")
+
+levels(nsfg$momeduc) <- c("Less than HS", "HS grad/GED", "Some college", "Assoc/Tech", "College", "Beyond college")
+levels(nsfg$momrace) <- c("Non-Hispanic white", "Non-Hispanic black", "Hispanic", "Other")
+levels(nsfg$marital) <- c("Single", "Married", "Widowed", "Divorced", "Separated", "Missing")
+levels(nsfg$insurance) <- c("Private", "Public",  "None", "Missing")
+levels(nsfg$work) <- c("No", "Yes", "Missing")
+levels(nsfg$smoke) <- c("No", "Yes", "Missing")
+levels(nsfg$num_cigs) <- c("0", "1", "2-4", "5-14", "15-24", "25-34", "More than 34", "Missing")
+```
+
+
+## Education
+```{r echo=FALSE, fig.width=7,fig.height=3.5}
+
+# get_data <- function(numomv, nsfgv){
+#   d1 <- data.frame(numomv, rep(1, length(numomv)))
+#   colnames(d1) <- c(colnames(nsfgv)[1], "source")
+#   vec_nsfg <- NULL
+#   for (i in 1:nrow(nsfgv)){
+#     vec_nsfg <- c(vec_nsfg, rep(i, nsfgv[[2]][i]))
+#   }
+#   vec_nsfg <- factor(vec_nsfg)
+#   levels(vec_nsfg) <- rownames(nsfgv)
+#   d2 <- data.frame(vec_nsfg, rep(0, length(vec_nsfg)))
+#   colnames(d2) <- c(colnames(nsfgv)[1], "source")
+#   d <- rbind(d1, d2)
+#   return(d)
+# }
+# d <- get_data(numom$momeduc, nsfgeduc)
+# educ <- table(d$source, d$momeduc)
+
+# ggplot(d, aes(group = source, x=momeduc)) +
+# geom_bar(aes(y=..prop..), position="dodge", , stat="count") + labs(title='Comparison of Mom Education', x="Mom Education", y="Frequency", fill="Source")+
+#           facet_grid(~source)
+
+# Check distribution of education
+numom_educ <- table(numom$momeduc)
+d_numom <- data.frame( numom_educ)
+colnames(d_numom) <- c("momeduc","count")
+ggplot(d_numom) +
+geom_bar(aes(x=momeduc, y=count/sum(count)), position="dodge", , stat="identity") + labs(title='Bar plot of Mom Education in Numom', x="Mom Education", y="Proportion")
+
+nsfg_design <- 
+      svydesign( 
+          id = ~ nsfg_raw$SECU , 
+          strata = ~ nsfg_raw$SEST , 
+          data = nsfg , 
+          weights = ~ nsfg_raw$WGT2015_2017 , 
+          nest = TRUE 
+      )
+nsfg_design <- 
+    update( 
+        nsfg_design , one = 1)
+nsfgeduc <- svyby( ~ one , ~ momeduc , nsfg_design , svytotal )
+d_nsfg <- d_numom
+d_nsfg$count <- nsfgeduc$one
+colnames(d_nsfg) <- c("momeduc","count")
+ggplot(d_nsfg) +
+geom_bar(aes(x=momeduc, y=count/sum(count)), position="dodge", , stat="identity") + labs(title='Bar plot of Mom Education in NSFG', x="Mom Education", y="Proportion")
+
+educ <- rbind(d_nsfg$count, d_numom$count)
+knitr::kable(educ)
+chisq.test(educ)
+```
+
+## Race
+
+```{r echo=FALSE, fig.width=7,fig.height=3.5}
+numom_race <- table(numom$momrace)
+d_numom <- data.frame( numom_race)
+colnames(d_numom) <- c("momrace","count")
+ggplot(d_numom) +
+geom_bar(aes(x=momrace, y=count/sum(count)), position="dodge", , stat="identity") + labs(title='Bar plot of Mom Race in Numom', x="Mom Race", y="Proportion")
+
+nsfgrace <- svyby( ~ one , ~ momrace , nsfg_design , svytotal )
+d_nsfg <- d_numom
+d_nsfg$count <- nsfgrace$one
+colnames(d_nsfg) <- c("momrace","count")
+ggplot(d_nsfg) +
+geom_bar(aes(x=momrace, y=count/sum(count)), position="dodge", , stat="identity") + labs(title='Bar plot of Mom Race in NSFG', x="Mom Race", y="Proportion")
+
+race <- rbind(d_nsfg$count, d_numom$count)
+knitr::kable(race)
+chisq.test(race)
+```
+
+
+
+# Possible effect modifier
+
+
+```{r include=FALSE}
+
+# Some other covariates and treatment effects
+
+# BMI
+numom$bmi <- numom_raw$bmiprepreg
+numom$bmi_NA <- ifelse(is.na(numom$bmi),1,0)
+numom$bmi[is.na(numom$bmi)] <- mean(numom$bmi,na.rm = T)
+numom$bmi_NA <- as.factor(numom$bmi_NA)
+
+numom$trial <- NULL
+
+# Other dietary components
+numom$fruit <- numom_raw$f_totdens
+numom$vege <- numom_raw$v_totdens
+numom$beans <- numom_raw$v_beangrendens
+numom$grain <- numom_raw$g_whldens
+numom$dairy <- numom_raw$d_totdens
+numom$protein <- numom_raw$p_totdens
+numom$seaplant <- numom_raw$p_seaplantdens
+numom$fatty <- numom_raw$fatratio
+numom$refined_grain <- numom_raw$g_nwhldens
+numom$sodium <- numom_raw$sodium_dens
+numom$empty <- numom_raw$pct_emptyc
+
+
+covariates <- colnames(numom)
+
+# fruit80
+numom$fruit80 <- numom_raw$f_totdens80
+#numom$fruit80 <- factor(numom$fruit80, labels=c("< 80th percentile", "> 80th percentile"))
+numom$vege80 <- numom_raw$v_totdens80
+
+
+
+# Outcome
+numom$SGA <- numom_raw$sgahad
+numom$pree_acog <- numom_raw$pree_acog
+numom$gdm <- numom_raw$gdm
+numom$ptb37 <- numom_raw$ptb37
+
+
+levels(numom$momeduc) <- c("Less than HS", "HS grad/GED", "Some college", "Assoc/Tech", "College", "Beyond college")
+levels(numom$momrace) <- c("Non-Hispanic white", "Non-Hispanic black", "Hispanic", "Other")
+levels(numom$insurance) <- c("Private", "Public",  "None", "Missing")
+levels(numom$marital) <- c("Single", "Married", "Widowed", "Divorced", "Separated", "Missing")
+levels(numom$work) <- c("No", "Yes", "Missing")
+levels(numom$smoke) <- c("No", "Yes", "Missing")
+levels(numom$num_cigs) <- c("0", "1", "2-4", "5-14", "15-24", "25-34", "More than 34", "Missing")
+
+levels(nsfg$momeduc) <- c("Less than HS", "HS grad/GED", "Some college", "Assoc/Tech", "College", "Beyond college")
+levels(nsfg$momrace) <- c("Non-Hispanic white", "Non-Hispanic black", "Hispanic", "Other")
+levels(nsfg$marital) <- c("Single", "Married", "Widowed", "Divorced", "Separated", "Missing")
+levels(nsfg$insurance) <- c("Private", "Public",  "None", "Missing")
+levels(nsfg$work) <- c("No", "Yes", "Missing")
+levels(nsfg$smoke) <- c("No", "Yes", "Missing")
+levels(nsfg$num_cigs) <- c("0", "1", "2-4", "5-14", "15-24", "25-34", "More than 34", "Missing")
+nsfg$trial <- NULL
+
+```
+
+The effect of fruit on preterm birth. All other dietary components are included as continuous confounders. The conditional effect is estimated as follows:
+
+Define $f(z)=\left\{\frac{a}{\pi(x)}-\frac{1-a}{1-\pi(x)}\right\}\left\{y-\mu_{a}(x)\right\}+\mu_{1}(x)-\mu_{0}(x)$ and $\hat{\varphi} = \mathbb{P}_n\hat{f}$ is the doubly robust estimator of treatment effect. The condition effect $\tau(v) =  \mathbb{E}[Y|V=v, A=1] - \mathbb{E}[Y|V=v, A=0]$ is naively estimated by
+\[
+\hat{\tau}(v) = \frac{1}{n_v} \sum_{V_i=v}\hat{f}(Z_i).
+\]
+Here $V \subseteq X$. And confidence interval is constructed by CLT (let $\hat{\sigma}(v) =$ standard deviation of $\{\hat{f}(Z_i), V_i=v \}$, then the 95\% CI is $[\hat{\tau}(v)-1.96\hat{\sigma}(v)/\sqrt{n_v},\hat{\tau}(v)+1.96\hat{\sigma}(v)/\sqrt{n_v}]$.
+
+Now fit ate with all observations with missing values omitted. Since we have preprocessed all covariates, variables that contain missing values are only dietary components. There are 1556 people having missing values in all dietary components and they are omitted.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+set.seed(521)
+cova_fruit <- covariates[-12]
+pre_fruit <- na.omit(numom[,c(cova_fruit, "fruit80", "ptb37")])
+
+# Use ate function in npcausal, note that npcausal wraps SL.ranger
+ate_pre_fruit <- ate(pre_fruit$ptb37, pre_fruit$fruit80, pre_fruit[,cova_fruit], sl.lib=c("SL.glmnet", "SL.ranger",  "SL.mean"))
+CATE_naive <- function(ate_model, dat, variable){
+  result <- matrix(0, nrow=5, ncol=length(levels(dat[,variable])))
+  for (j in 1:length(levels(dat[,variable]))){
+    result[1,j] <- mean(ate_model$ifvals$a0[dat[,variable]==levels(dat[,variable])[j]])
+    result[2,j] <- mean(ate_model$ifvals$a1[dat[,variable]==levels(dat[,variable])[j]])
+    se <- sd(ate_model$ifvals$a1[dat[,variable]==levels(dat[,variable])[j]] - ate_model$ifvals$a0[dat[,variable]==levels(dat[,variable])[j]])
+    n <- length(ate_model$ifvals$a1[dat[,variable]==levels(dat[,variable])[j]])
+    result[3,j] <- result[2,j] - result[1,j]
+    result[4,j] <- result[3,j] - 1.96*se/sqrt(n)
+    result[5,j] <- result[3,j] + 1.96*se/sqrt(n)
+  }
+  rownames(result) <- c("E[Y(0)|V]", "E[Y(1)|V]", "E[Y(1)-Y(0)|V]", "95% CI lower", "95% CI upper")
+  colnames(result) <- levels(dat[,variable])
+  return(result)
+}
+```
+
+## Education
+
+```{r echo=FALSE}
+educ_fruit <- CATE_naive(ate_pre_fruit, pre_fruit, "momeduc")
+
+
+# Bootstrap CI
+# set.seed(521)
+# sfInit(parallel = TRUE, cpus = parallel::detectCores()-1)
+# sfLibrary(npcausal)
+# sfExport("pre_fruit", "covariates")
+# educ_boot <- sfSapply(1:1000, function(o){
+#   indices <- sample(nrow(pre_fruit), nrow(pre_fruit), replace=T)
+#   datab <- pre_fruit[indices,] 
+#   ateb <- ate(datab$ptb37, datab$fruit80, datab[,covariates], sl.lib=c("SL.glmnet", "SL.ranger", "SL.mean", "SL.earth"))
+#   res <- numeric(length(levels(pre_fruit$momeduc)))
+#   for (j in 1:length(levels(pre_fruit$momeduc))){
+#     y0 <- mean(ateb$ifvals$a0[datab$momeduc==levels(pre_fruit$momeduc)[j]])
+#     y1 <- mean(ateb$ifvals$a1[datab$momeduc==levels(pre_fruit$momeduc)[j]])
+#     res[j] <- y1-y0
+#   }
+#   return(res)
+# })
+# sfStop()
+# 
+# for (j in 1:length(levels(pre_fruit$momeduc))){
+#   educ_fruit[4,j] <- 2*educ_fruit[3,j] - quantile(educ_boot[j,], 0.975)
+#   educ_fruit[5,j] <- 2*educ_fruit[3,j] - quantile(educ_boot[j,], 0.025)
+# }
+
+
+knitr::kable(round(educ_fruit,4))
+educ_fruit_plt <- as.data.frame(t(educ_fruit[3:5,]))
+colnames(educ_fruit_plt) <- c("Effects", "Lower", "Upper")
+educ_fruit_plt$Education <- rownames(educ_fruit_plt)
+ggplot(educ_fruit_plt, aes(x = Education, y = Effects, ymin = Lower, ymax = Upper)) +
+  geom_pointrange()+ geom_errorbar()
+
+```
+
+We can see that covariates, especially education level, may modify the effects (CIs for less than high school and beyond college do not overlap). And since the distribution of covariates in numom data differs from that in NSFG data, the causal effect is likely to be different. So our problem is well-motivated :). 
+
+# Doubly robust estimates
+
+```{r echo=FALSE}
+CATE_dr <- function(a, x, y){
+  set.seed(521)
+  folds <- sample(1:3, nrow(x), replace=T)
+  yfit <- matrix(0, nrow = nrow(x), ncol=3)
+  index <- t(matrix(c(1,2,3,2,3,1,1,3,2), nrow=3))
+  for (i in 1:3){
+    prop_score <- ranger(y = a[folds == index[i,1]], x = x[folds == index[i,1],], classification = T, probability = T)
+    reg_func1 <- ranger(y = y[folds == index[i,2] & a==1], x = x[folds == index[i,2] & a==1,])
+    reg_func0 <- ranger(y = y[folds == index[i,2] & a==0], x = x[folds == index[i,2] & a==0,])
+    prop_hat <- predict(prop_score, data = x[folds == index[i,3],])$predictions[,2]
+    reg_hat1 <- predict(reg_func1, data = x[folds == index[i,3],])$predictions
+    reg_hat0 <- predict(reg_func0, data = x[folds == index[i,3],])$predictions
+    phi <- (a[folds == index[i,3]] - prop_hat)*(y[folds == index[i,3]] - a[folds == index[i,3]]*reg_hat1-(1-a[folds == index[i,3]])*reg_hat0)/(prop_hat*(1-prop_hat)) + reg_hat1 - reg_hat0
+    cate <- ranger(y = phi, x = x[folds == index[i,3],])
+    yfit[,i] <- predict(cate, data = x)$predictions
+  }
+  return(apply(yfit,1,mean))
+}
+cate_re <- CATE_dr(pre_fruit$fruit80, pre_fruit[,cova_fruit], pre_fruit$ptb37)
+```
+
+Then we use Algorithm 1 in conditional effects paper. After obtaining $\{\hat{\tau}(X_i), 1 \leq i \leq n_1\}$, we show the histogram of those with different education level. We can see the distribution of conditional effects among populations with different education level is quite different.
+
+```{r echo=FALSE, fig.height=4.5}
+par(mfrow=c(1,2))
+for (j in 1:length(levels(pre_fruit$momeduc))){
+  part <- cate_re[pre_fruit$momeduc == levels(pre_fruit$momeduc)[j] & abs(cate_re)<2]
+  hist(part, breaks = 30, probability = T, main=paste("Histogram of CATE among", levels(pre_fruit$momeduc)[j]), xlab="cate")
+  #ggplot(data.frame(part), aes(x=part)) +
+#geom_histogram(binwidth = 0.1) + labs(title='Comparison of Mom Smoking Status', x="Mom Smoking Status", y="Counts", fill="Source")
+}
+
+```
+
+
+
+
+# Transportation
+
+We then implement the transportation estimator. The doubly robust estimator is 
+\[
+\hat{\psi}_a=\frac{1}{\widehat{P}(S=0)}P_n \left[\frac{I(A = a, S = 1)\widehat{P}(S=0|V)(Y-\hat{\mu}_a(X,1))}{\widehat{P}(S=1|V)\widehat{P}(A=a|X,S=1)} + \frac{I(S=1)\widehat{P}(S=0|V)(\hat{\mu}_a(X,1) - \hat{\tau}_a(V))}{\widehat{P}(S=1|V)} + I(S=0)\hat{\tau}_a(V) \right],
+\]
+where $\mu_a(X,1) = \mathbb{E}[Y|X,A=a,S=1]$, $\tau_a(V) = \mathbb{E}[\mu_a(X,1)|S=1,V]$ and $n = n_1 + n_2$. To achieve $\sqrt{n}$-consistency, we need to apply sample splitting. I divide the trial data $D_{\text{trial}}$ and target data $D_{\text{target}}$ into two parts $D_{\text{trial}}^1$, $D_{\text{trial}}^2$ and $D_{\text{target}}^1$, $D_{\text{target}}^2$, respectively. First $D_{\text{trial}}^1$ and $D_{\text{target}}^1$ are used to estimate $\mu_a(X,1)$, $\tau_a(V)$ and obtain the estimated values of these functions on $D_{\text{trial}}^2$ and $D_{\text{target}}^2$. Then change the role of two parts. Then compute the estimated (uncentered) influence function for each sample. Then take average over all $n = n_1 + n_2$ samples. The sample standard error is used to construct CI. For $E[Y^1|S=0]-E[Y^0|S=0] = \psi_1 - \psi_0$, I similarly obtain $n$ IFs and use sample mean and standard error.
+
+```{r echo=FALSE}
+# Transport the causal effects
+detach("package:npcausal", unload = TRUE)
+
+# When using parallel training
+# options(mc.cores = 4)
+
+cova_fruit <- covariates[-12]
+
+# Effects of fruit on preterm birth
+set.seed(521)
+pre_fruit <- na.omit(numom[,c(cova_fruit, "fruit80", "ptb37")])
+pre_fruit_tran <- transport_dr(pre_fruit$fruit80, pre_fruit$ptb37, pre_fruit[,cova_fruit], nsfg, sl.lib.source = c( "SL.ranger","SL.mean","SL.glmnet"), sl.lib.target = c( "SL.ranger","SL.mean","SL.glmnet"), 5, epsilon = 0.01, survey = T)
+#transport_plugin(pre_fruit$fruit80, pre_fruit$ptb37, pre_fruit[,cova_pre_fruit], nsfg, sl.lib = c( "SL.ranger","SL.mean"))
+# -0.02137, 0.002663 ranger+mean+glmnet,enforce epsilon
+
+# Effects of fruit on GDM
+set.seed(521)
+gdm_fruit <- na.omit(numom[,c(cova_fruit, "fruit80", "gdm")])
+gdm_fruit_tran <- transport_dr(gdm_fruit$fruit80, gdm_fruit$gdm, gdm_fruit[,cova_fruit], nsfg, sl.lib.source = c( "SL.ranger","SL.mean","SL.glmnet"), sl.lib.target = c( "SL.ranger","SL.mean", "SL.glmnet"), 5, epsilon = 0.01, survey = T)
+# 0.001142, 0.002612
+
+# Effects of fruit on Pre-eclampsia
+set.seed(521)
+pree_fruit <- na.omit(numom[,c(cova_fruit, "fruit80", "pree_acog")])
+pree_fruit_tran <- transport_dr(pree_fruit$fruit80, pree_fruit$pree_acog, pree_fruit[,cova_fruit], nsfg, sl.lib.source = c( "SL.ranger","SL.mean","SL.glmnet"), sl.lib.target = c( "SL.ranger","SL.mean","SL.glmnet"), 5, epsilon = 0.01, survey = T)
+# -0.01195, 0.002904
+
+# Effects of fruit on SGA
+set.seed(521)
+sga_fruit <- na.omit(numom[,c(cova_fruit, "fruit80", "SGA")])
+sga_fruit_tran <- transport_dr(sga_fruit$fruit80, sga_fruit$SGA, sga_fruit[,cova_fruit], nsfg, sl.lib.source = c( "SL.ranger","SL.mean","SL.glmnet"), sl.lib.target = c( "SL.ranger","SL.mean","SL.glmnet"), 5, epsilon = 0.01, survey = T)
+
+# -0.01637, 0.003224
+
+# Plot
+fruit_effs <- matrix(0, nrow=4, ncol=2)
+fruit_effs[1,] <- pre_fruit_tran[[1]][,3]
+fruit_effs[2,] <- gdm_fruit_tran[[1]][,3]
+fruit_effs[3,] <- pree_fruit_tran[[1]][,3]
+fruit_effs[4,] <- sga_fruit_tran[[1]][,3]
+fruit_effs <- as.data.frame(fruit_effs)
+colnames(fruit_effs) <- c("mean","sd")
+fruit_effs$outcome <- c("Preterm Birth", "Gestational Diabetes", "Pre-eclampsia", "SGA birth")
+ggplot(fruit_effs, aes(x = outcome, y = mean, ymin = mean-1.96*sd, ymax = mean+1.96*sd)) +
+  geom_pointrange() + geom_errorbar()+ labs(title='Treatmant Effects of Fruit in the Target Population', x="Outcomes", y="Effects") +
+  theme(axis.text=element_text(size=12), axis.title=element_text(size=14,face="bold"), plot.title = element_text(size=22))
+
+# Effects of vegetables on preterm birth
+set.seed(521)
+cova_vege <- covariates[-13]
+pre_vege <- na.omit(numom[,c(cova_vege, "vege80", "ptb37")])
+pre_vege_tran <- transport_dr(pre_vege$vege80, pre_vege$ptb37, pre_vege[,cova_vege], nsfg, sl.lib.source = c( "SL.ranger","SL.mean","SL.glmnet"), sl.lib.target = c( "SL.ranger","SL.mean","SL.glmnet"), 5, epsilon = 0.01, survey = T)
+# -0.04423, 0.002501
+
+# Effects on vegetables on GDM
+set.seed(521)
+gdm_vege <- na.omit(numom[,c(cova_vege, "vege80", "gdm")])
+gdm_vege_tran <- transport_dr(gdm_vege$vege80, gdm_vege$gdm, gdm_vege[,cova_vege], nsfg, sl.lib.source = c( "SL.mean","SL.ranger","SL.glmnet"), sl.lib.target = c( "SL.mean","SL.ranger","SL.glmnet"), 5, epsilon = 0.01, survey = TRUE)
+# 0.02402, 0.002525
+
+
+# Effects on vegetables on Pre-eclampsia
+pree_vege <- na.omit(numom[,c(cova_vege, "vege80", "pree_acog")])
+pree_vege_tran <- transport_dr(pree_vege$vege80, pree_vege$pree_acog, pree_vege[,cova_vege], nsfg, sl.lib.source = c( "SL.ranger","SL.mean","SL.glmnet"), sl.lib.target = c( "SL.ranger","SL.mean","SL.glmnet"), 5, epsilon = 0.01, survey = TRUE)
+# -0.001018, 0.005718
+
+# Effects on vegetables on SGA
+sga_vege <- na.omit(numom[,c(cova_vege, "vege80", "SGA")])
+sga_vege_tran <- transport_dr(sga_vege$vege80, sga_vege$SGA, sga_vege[,cova_vege], nsfg, sl.lib.source = c( "SL.ranger","SL.mean","SL.glmnet"), sl.lib.target = c( "SL.ranger","SL.mean","SL.glmnet"), 5, epsilon = 0.01, survey = TRUE)
+# -0.01655, 0.00266
+
+
+vege_effs <- matrix(0, nrow=4, ncol=2)
+vege_effs[1,] <- pre_vege_tran[[1]][,3]
+vege_effs[2,] <- gdm_vege_tran[[1]][,3]
+vege_effs[3,] <- pree_vege_tran[[1]][,3]
+vege_effs[4,] <- sga_vege_tran[[1]][,3]
+vege_effs <- as.data.frame(vege_effs)
+colnames(vege_effs) <- c("mean","sd")
+vege_effs$outcome <- c("Preterm Birth", "Gestational Diabetes", "Pre-eclampsia", "SGA birth")
+ggplot(vege_effs, aes(x = outcome, y = mean, ymin = mean-1.96*sd, ymax = mean+1.96*sd)) +
+  geom_pointrange() + geom_errorbar()+ labs(title='Treatmant Effects of Vegetables in the Target Population', x="Outcomes", y="Effects") +
+  theme(axis.text=element_text(size=12), axis.title=element_text(size=14,face="bold"), plot.title = element_text(size=22))
+
+# Sensitivity analysis
+# delta2 = 0
+xs <- seq(from = 0, to = 0.03, by = 0.001)
+ys_lower <- gdm_vege_tran$results[1,3] - xs
+ys_upper <- gdm_vege_tran$results[1,3] + xs
+sensitivity_data <- data.frame(xs, ys_lower, ys_upper)
+ggplot(sensitivity_data) + 
+    geom_line(mapping = aes(x = xs, y = ys_lower)) + 
+    geom_line(mapping = aes(x = xs, y = ys_upper)) +
+    geom_ribbon(aes(x = xs, ymin = ys_lower, ymax = ys_upper), fill="blue", alpha=0.5) +
+    scale_y_continuous(expand = c(0, 0), limits=c(-0.02,0.06)) +
+    scale_x_continuous(expand = c(0, 0), limits=c(-0.003,0.033)) + 
+    labs(title="Exchangeability violated", x="delta1", y="Effect value")+
+    theme(axis.text=element_text(size=12), axis.title=element_text(size=14,face="bold"), plot.title = element_text(size=22))
+
+xs <- seq(from = 0, to = 0.02, by = 0.001)
+ys_lower <- gdm_vege_tran$results[1,3] - 2*xs
+ys_upper <- gdm_vege_tran$results[1,3] + 2*xs
+sensitivity_data <- data.frame(xs, ys_lower, ys_upper)
+ggplot(sensitivity_data) + 
+    geom_line(mapping = aes(x = xs, y = ys_lower)) + 
+    geom_line(mapping = aes(x = xs, y = ys_upper)) +
+    geom_ribbon(aes(x = xs, ymin = ys_lower, ymax = ys_upper), fill="blue", alpha=0.5) +
+    scale_y_continuous(expand = c(0, 0), limits=c(-0.02,0.07)) +
+    scale_x_continuous(expand = c(0, 0), limits=c(-0.003,0.023)) + 
+    labs(title="Transportability violated", x="delta2", y="Effect value")+
+    theme(axis.text=element_text(size=12), axis.title=element_text(size=14,face="bold"), plot.title = element_text(size=22))
+
+# plot(c(0,0.05), c(-0.0443, 0.0057), type="l", main="Exchangeability violated", ylim=c(-0.1, 0.01), xlab="delta1", ylab="value")
+# lines(c(0,0.05), c(-0.0443, -0.0943))
+# polygon(c(0,0.05,0.05), c(-0.0443,0.0057,-0.0943), col="green")
+# abline(h=0, lty=2, col=2)
+# 
+# plot(c(0,0.03), c(-0.0443, 0.0157), type="l", main="Transportability violated", ylim=c(-0.11, 0.02), xlab="delta2", ylab="value")
+# lines(c(0,0.03), c(-0.0443, -0.1043))
+# polygon(c(0,0.03,0.03), c(-0.0443,0.0157,-0.1043), col="green")
+# abline(h=0, lty=2, col=2)
+
+
+```
+
+
+
+```{r}
+
+# Model selection updated version
+cova_vege <- covariates[-13]
+gdm_vege <- na.omit(numom[,c(cova_vege, "vege80", "gdm")])
+n_source <- nrow(gdm_vege)
+n_target <- nrow(nsfg)
+n_folds <- 5
+muhat <- matrix(0, nrow=n_source, ncol=2)
+set.seed(521)
+split_source <- sample(1:n_folds, n_source, replace = T)
+split_target <- sample(1:n_folds, n_target, replace = T)
+x_source_aug <- janitor::clean_names(as.data.frame(model.matrix(~-1+., gdm_vege[,cova_vege])))
+x_target_aug <- janitor::clean_names(as.data.frame(model.matrix(~-1+., nsfg)))
+cova_target_aug <- colnames(x_target_aug)
+mtry_seq <- seq(from = 3, to = 7, by = 2)
+node_size_seq <- c(5,10,20)
+rf_learners <- create.Learner("SL.ranger", tune = list(mtry = mtry_seq, min.node.size = node_size_seq, replace=c(T,F)))
+depth_seq <- c(4,6,8)
+shrink_seq <- c(0.1, 0.01, 0.001)
+xgboost_learners <- create.Learner("SL.xgboost", tune = list(max_depth = depth_seq, shrinkage=shrink_seq))
+nu_seq <- c(0.1, 0.3, 0.5, 0.7)
+svm_learners <- create.Learner("SL.svm", tune = list(nu = nu_seq))
+SL.lib<- c("SL.mean","SL.glmnet", rf_learners$names, xgboost_learners$names, svm_learners$names)
+
+mu_cv <- function(a, y, split_source, split_target, sl.lib){
+  options(mc.cores = 4)
+  set.seed(123, "L'Ecuyer-CMRG")
+  muhat <- matrix(0, nrow=n_source, ncol=2)
+  for (aa in 1:2){
+    for (i in 1:n_folds){
+      train_source <- split_source != i
+      test_source <- split_source == i
+      mufit <- mcSuperLearner(y[a==aa-1 & train_source],
+      x_source_aug[a==aa-1 & train_source,],
+      newX=x_source_aug, SL.library=sl.lib)
+      muhat[test_source,aa] <- mufit$SL.predict[test_source]
+    }
+  }
+  return(muhat)
+}
+
+muhat_complex <- mu_cv(gdm_vege$vege80, gdm_vege$gdm, split_source, split_target, SL.lib)
+muhat_rfsvm <- mu_cv(gdm_vege$vege80, gdm_vege$gdm, split_source, split_target, c("SL.mean","SL.glmnet",rf_learners$names, svm_learners$names))
+muhat_rfxg <- mu_cv(gdm_vege$vege80, gdm_vege$gdm, split_source, split_target, c("SL.mean","SL.glmnet",rf_learners$names, xgboost_learners$names))
+muhat_svmxg <- mu_cv(gdm_vege$vege80, gdm_vege$gdm, split_source, split_target, c("SL.mean","SL.glmnet",svm_learners$names, xgboost_learners$names))
+muhat_rf <- mu_cv(gdm_vege$vege80, gdm_vege$gdm, split_source, split_target, c("SL.mean","SL.glmnet",rf_learners$names))
+muhat_svm <- mu_cv(gdm_vege$vege80, gdm_vege$gdm, split_source, split_target, c("SL.mean","SL.glmnet",svm_learners$names))
+muhat_xg <- mu_cv(gdm_vege$vege80, gdm_vege$gdm, split_source, split_target, c("SL.mean","SL.glmnet",xgboost_learners$names))
+muhat_simple <- mu_cv(gdm_vege$vege80, gdm_vege$gdm, split_source, split_target, c("SL.mean","SL.glmnet","SL.ranger"))
+
+
+pi_cv <- function(a, split_source, split_target, sl.lib){
+  pi_treat <- numeric(length=n_source)
+  options(mc.cores = 4)
+  set.seed(123, "L'Ecuyer-CMRG")
+  for (i in 1:n_folds){
+    train_source <- split_source != i
+    test_source <- split_source == i
+    pifit <- mcSuperLearner(a[train_source],x_source_aug[train_source,],
+    newX=x_source_aug[test_source,], SL.library=sl.lib, family=binomial)
+    pi_treat[test_source] <-pifit$SL.predict
+  }
+  return(pi_treat)
+}
+
+pihat_complex <- pi_cv(gdm_vege$vege80, split_source, split_target, SL.lib)
+pihat_rfsvm <- pi_cv(gdm_vege$vege80, split_source, split_target, c("SL.mean","SL.glmnet",rf_learners$names, svm_learners$names))
+pihat_rfxg <- pi_cv(gdm_vege$vege80, split_source, split_target, c("SL.mean","SL.glmnet",rf_learners$names, xgboost_learners$names))
+pihat_svmxg <- pi_cv(gdm_vege$vege80, split_source, split_target, c("SL.mean","SL.glmnet",svm_learners$names, xgboost_learners$names))
+pihat_rf <- pi_cv(gdm_vege$vege80, split_source, split_target, c("SL.mean","SL.glmnet",rf_learners$names))
+pihat_svm <- pi_cv(gdm_vege$vege80, split_source, split_target, c("SL.mean","SL.glmnet",svm_learners$names))
+pihat_xg <- pi_cv(gdm_vege$vege80, split_source, split_target, c("SL.mean","SL.glmnet", xgboost_learners$names))
+pihat_simple <- pi_cv(gdm_vege$vege80, split_source, split_target, c("SL.mean","SL.glmnet", "SL.ranger"))
+
+data_aug <- rbind(x_source_aug[,cova_target_aug], x_target_aug)
+label <- c(rep(1, n_source), rep(0, n_target))
+cv_rho <- function(label, split_source, split_target, sl.lib){
+  rhohat <- numeric(n_source+n_target)
+  options(mc.cores = 4)
+  set.seed(123, "L'Ecuyer-CMRG")
+  for (i in 1:n_folds){
+    train_source <- split_source != i
+    train_target <- split_target != i
+    test_source <- split_source == i
+    test_target <- split_target == i
+    rhofit <- mcSuperLearner(label[c(train_source, train_target)],data_aug[c(train_source, train_target),],
+    newX=rbind(x_source_aug[test_source,cova_target_aug], x_target_aug[test_target,]), SL.library=sl.lib, family=binomial)
+    rhohat[c(test_source, test_target)] <-rhofit$SL.predict
+  }
+  return(rhohat)
+}
+
+rhohat_complex <- cv_rho(label, split_source, split_target, SL.lib)
+rhohat_rfsvm <- cv_rho(label, split_source, split_target, c("SL.mean","SL.glmnet",rf_learners$names, svm_learners$names))
+rhohat_rfxg <- cv_rho(label, split_source, split_target, c("SL.mean","SL.glmnet",rf_learners$names, xgboost_learners$names))
+rhohat_svmxg <- cv_rho(label, split_source, split_target, c("SL.mean","SL.glmnet",svm_learners$names, xgboost_learners$names))
+rhohat_svm <- cv_rho(label, split_source, split_target, c("SL.mean","SL.glmnet",svm_learners$names))
+rhohat_rf <- cv_rho(label, split_source, split_target, c("SL.mean","SL.glmnet",rf_learners$names))
+rhohat_xg <- cv_rho(label, split_source, split_target, c("SL.mean","SL.glmnet",xgboost_learners$names))
+rhohat_simple <- cv_rho(label, split_source, split_target, c("SL.mean","SL.glmnet","SL.ranger"))
+
+mu_source <- matrix(0, nrow=n_source, ncol=2)
+mu0fit <- mcSuperLearner(gdm_vege$gdm[a==0],
+      x_source_aug[a==0,],
+      newX=x_source_aug, SL.library=c("SL.mean","SL.glmnet","SL.ranger"))
+mu1fit <- mcSuperLearner(gdm_vege$gdm[a==1],
+      x_source_aug[a==1,],
+      newX=x_source_aug, SL.library=c("SL.mean","SL.glmnet","SL.ranger"))
+mu_source[,1] <- mu0fit$SL.predict
+mu_source[,2] <- mu1fit$SL.predict
+tau_cv <- function(mu, split_source, sl.lib){
+  options(mc.cores = 4)
+  set.seed(123, "L'Ecuyer-CMRG")
+  tauhat <- matrix(0, nrow=n_source, ncol=2)
+  for (aa in 1:2){
+    for (i in 1:n_folds){
+      train_source <- split_source != i
+      test_source <- split_source == i
+      taufit <- mcSuperLearner(mu[train_source,aa],
+      x_source_aug[train_source,cova_target_aug],
+      newX=x_source_aug[test_source,cova_target_aug], SL.library=sl.lib)
+      tauhat[test_source,aa] <- taufit$SL.predict
+    }
+  }
+  return(tauhat)
+}
+tauhat_complex <- tau_cv(mu_source, split_source, SL.lib)
+tauhat_rfsvm <- tau_cv(mu_source, split_source, c("SL.mean","SL.glmnet",rf_learners$names, svm_learners$names))
+tauhat_rfxg <- tau_cv(mu_source, split_source, c("SL.mean","SL.glmnet",rf_learners$names, xgboost_learners$names))
+tauhat_xgsvm <- tau_cv(mu_source, split_source, c("SL.mean","SL.glmnet",xgboost_learners$names, svm_learners$names))
+tauhat_rf <- tau_cv(mu_source, split_source, c("SL.mean","SL.glmnet",rf_learners$names))
+tauhat_svm <- tau_cv(mu_source, split_source, c("SL.mean","SL.glmnet",svm_learners$names))
+tauhat_xg <- tau_cv(mu_source, split_source, c("SL.mean","SL.glmnet",xgboost_learners$names))
+tauhat_simple <- tau_cv(mu_source, split_source, c("SL.mean","SL.glmnet","SL.ranger"))
+```
+
+```{r}
+# Plot the CV results
+# mu1
+cv_mu_res <- matrix(0, nrow=8, ncol=3)
+mu1_complex <- muhat_complex[gdm_vege$vege80==1,2]
+res_complex <- (gdm_vege[gdm_vege$vege80==1,]$gdm-mu1_complex)^2
+cv_mu_res[1,] <- c(mean(res_complex), mean(res_complex)-1.96*sd(res_complex)/sqrt(length(res_complex)), mean(res_complex)+1.96*sd(res_complex)/sqrt(length(res_complex)))
+mu1_rf <- muhat_rf[gdm_vege$vege80==1,2]
+res_rf <- (gdm_vege[gdm_vege$vege80==1,]$gdm-mu1_rf)^2
+cv_mu_res[2,] <- c(mean(res_rf), mean(res_rf)-1.96*sd(res_rf)/sqrt(length(res_rf)), mean(res_rf)+1.96*sd(res_rf)/sqrt(length(res_rf)))
+mu1_svm <- muhat_svm[gdm_vege$vege80==1,2]
+res_svm <- (gdm_vege[gdm_vege$vege80==1,]$gdm-mu1_svm)^2
+cv_mu_res[3,] <- c(mean(res_svm), mean(res_svm)-1.96*sd(res_svm)/sqrt(length(res_svm)), mean(res_svm)+1.96*sd(res_svm)/sqrt(length(res_svm)))
+mu1_xg <- muhat_xg[gdm_vege$vege80==1,2]
+res_xg <- (gdm_vege[gdm_vege$vege80==1,]$gdm-mu1_xg)^2
+cv_mu_res[4,] <- c(mean(res_xg), mean(res_xg)-1.96*sd(res_xg)/sqrt(length(res_xg)), mean(res_xg)+1.96*sd(res_xg)/sqrt(length(res_xg)))
+mu1_rfsvm <- muhat_rfsvm[gdm_vege$vege80==1,2]
+res_rfsvm <- (gdm_vege[gdm_vege$vege80==1,]$gdm-mu1_rfsvm)^2
+cv_mu_res[5,] <- c(mean(res_rfsvm), mean(res_rfsvm)-1.96*sd(res_rfsvm)/sqrt(length(res_rfsvm)), mean(res_rfsvm)+1.96*sd(res_rfsvm)/sqrt(length(res_rfsvm)))
+mu1_rfxg <- muhat_rfxg[gdm_vege$vege80==1,2]
+res_rfxg <- (gdm_vege[gdm_vege$vege80==1,]$gdm-mu1_rfxg)^2
+cv_mu_res[6,] <- c(mean(res_rfxg), mean(res_rfxg)-1.96*sd(res_rfxg)/sqrt(length(res_rfxg)), mean(res_rfxg)+1.96*sd(res_rfxg)/sqrt(length(res_rfxg)))
+mu1_svmxg <- muhat_svmxg[gdm_vege$vege80==1,2]
+res_svmxg <- (gdm_vege[gdm_vege$vege80==1,]$gdm-mu1_svmxg)^2
+cv_mu_res[7,] <- c(mean(res_svmxg), mean(res_svmxg)-1.96*sd(res_svmxg)/sqrt(length(res_svmxg)), mean(res_svmxg)+1.96*sd(res_svmxg)/sqrt(length(res_svmxg)))
+mu1_simple <- muhat_simple[gdm_vege$vege80==1,2]
+res_simple<- (gdm_vege[gdm_vege$vege80==1,]$gdm-mu1_simple)^2
+cv_mu_res[8,] <- c(mean(res_simple), mean(res_simple)-1.96*sd(res_simple)/sqrt(length(res_simple)), mean(res_simple)+1.96*sd(res_simple)/sqrt(length(res_simple)))
+cv_mu_res <- as.data.frame(cv_mu_res)
+colnames(cv_mu_res) <- c("risk","lower","upper")
+cv_mu_res$models <- c("glm+rf+svm+xg", "glm+tuned-rf", "glm+svm","glm+xg","glm+rf+svm","gm+rf+xg","glm+svm+xg", "glm+ranger")
+ggplot(cv_mu_res, aes(x = models, y = risk, ymin = lower, ymax = upper)) +
+  geom_pointrange() + geom_errorbar()+ labs(title='CV error for mu1 function', x="Models", y="Risk")
+
+# mu0
+cv_mu_res <- matrix(0, nrow=8, ncol=3)
+mu0_complex <- muhat_complex[gdm_vege$vege80==0,1]
+res_complex <- (gdm_vege[gdm_vege$vege80==0,]$gdm-mu0_complex)^2
+cv_mu_res[1,] <- c(mean(res_complex), mean(res_complex)-1.96*sd(res_complex)/sqrt(length(res_complex)), mean(res_complex)+1.96*sd(res_complex)/sqrt(length(res_complex)))
+mu0_rf <- muhat_rf[gdm_vege$vege80==0,1]
+res_rf <- (gdm_vege[gdm_vege$vege80==0,]$gdm-mu0_rf)^2
+cv_mu_res[2,] <- c(mean(res_rf), mean(res_rf)-1.96*sd(res_rf)/sqrt(length(res_rf)), mean(res_rf)+1.96*sd(res_rf)/sqrt(length(res_rf)))
+mu0_svm <- muhat_svm[gdm_vege$vege80==0,1]
+res_svm <- (gdm_vege[gdm_vege$vege80==0,]$gdm-mu0_svm)^2
+cv_mu_res[3,] <- c(mean(res_svm), mean(res_svm)-1.96*sd(res_svm)/sqrt(length(res_svm)), mean(res_svm)+1.96*sd(res_svm)/sqrt(length(res_svm)))
+mu0_xg <- muhat_xg[gdm_vege$vege80==0,1]
+res_xg<- (gdm_vege[gdm_vege$vege80==0,]$gdm-mu0_xg)^2
+cv_mu_res[4,] <- c(mean(res_xg), mean(res_xg)-1.96*sd(res_xg)/sqrt(length(res_xg)), mean(res_xg)+1.96*sd(res_xg)/sqrt(length(res_xg)))
+mu0_rfsvm <- muhat_rfsvm[gdm_vege$vege80==0,1]
+res_rfsvm<- (gdm_vege[gdm_vege$vege80==0,]$gdm-mu0_rfsvm)^2
+cv_mu_res[5,] <- c(mean(res_rfsvm), mean(res_rfsvm)-1.96*sd(res_rfsvm)/sqrt(length(res_rfsvm)), mean(res_rfsvm)+1.96*sd(res_rfsvm)/sqrt(length(res_rfsvm)))
+mu0_rfxg <- muhat_rfxg[gdm_vege$vege80==0,1]
+res_rfxg<- (gdm_vege[gdm_vege$vege80==0,]$gdm-mu0_rfxg)^2
+cv_mu_res[6,] <- c(mean(res_rfxg), mean(res_rfxg)-1.96*sd(res_rfxg)/sqrt(length(res_rfxg)), mean(res_rfxg)+1.96*sd(res_rfxg)/sqrt(length(res_rfxg)))
+mu0_svmxg <- muhat_svmxg[gdm_vege$vege80==0,1]
+res_svmxg<- (gdm_vege[gdm_vege$vege80==0,]$gdm-mu0_svmxg)^2
+cv_mu_res[7,] <- c(mean(res_svmxg), mean(res_svmxg)-1.96*sd(res_svmxg)/sqrt(length(res_svmxg)), mean(res_svmxg)+1.96*sd(res_svmxg)/sqrt(length(res_svmxg)))
+mu0_simple <- muhat_simple[gdm_vege$vege80==0,1]
+res_simple<- (gdm_vege[gdm_vege$vege80==0,]$gdm-mu0_simple)^2
+cv_mu_res[8,] <- c(mean(res_simple), mean(res_simple)-1.96*sd(res_simple)/sqrt(length(res_simple)), mean(res_simple)+1.96*sd(res_simple)/sqrt(length(res_simple)))
+cv_mu_res <- as.data.frame(cv_mu_res)
+colnames(cv_mu_res) <- c("risk","lower","upper")
+cv_mu_res$models <- c("glm+rf+svm+xg", "glm+tuned-rf", "glm+svm","glm+xg","glm+rf+svm","gm+rf+xg","glm+svm+xg", "glm+ranger")
+ggplot(cv_mu_res, aes(x = models, y = risk, ymin = lower, ymax = upper)) +
+  geom_pointrange() + geom_errorbar()+ labs(title='CV error for mu0 function', x="Models", y="Risk")
+
+# Pi
+cv_pi_res <- matrix(0, nrow=8, ncol=3)
+res_complex <- (gdm_vege$vege80-pihat_complex)^2
+cv_pi_res[1,] <- c(mean(res_complex), mean(res_complex)-1.96*sd(res_complex)/sqrt(length(res_complex)), mean(res_complex)+1.96*sd(res_complex)/sqrt(length(res_complex)))
+res_rf <- (gdm_vege$vege80-pihat_rf)^2
+cv_pi_res[2,] <- c(mean(res_rf), mean(res_rf)-1.96*sd(res_rf)/sqrt(length(res_rf)), mean(res_rf)+1.96*sd(res_rf)/sqrt(length(res_rf)))
+res_svm <- (gdm_vege$vege80-pihat_svm)^2
+cv_pi_res[3,] <- c(mean(res_svm), mean(res_svm)-1.96*sd(res_svm)/sqrt(length(res_svm)), mean(res_svm)+1.96*sd(res_svm)/sqrt(length(res_svm)))
+res_xg<- (gdm_vege$vege80-pihat_xg)^2
+cv_pi_res[4,] <- c(mean(res_xg), mean(res_xg)-1.96*sd(res_xg)/sqrt(length(res_xg)), mean(res_xg)+1.96*sd(res_xg)/sqrt(length(res_xg)))
+res_rfsvm<- (gdm_vege$vege80-pihat_rfsvm)^2
+cv_pi_res[5,] <- c(mean(res_rfsvm), mean(res_rfsvm)-1.96*sd(res_rfsvm)/sqrt(length(res_rfsvm)), mean(res_rfsvm)+1.96*sd(res_rfsvm)/sqrt(length(res_rfsvm)))
+res_rfxg<- (gdm_vege$vege80-pihat_rfxg)^2
+cv_pi_res[6,] <- c(mean(res_rfxg), mean(res_rfxg)-1.96*sd(res_rfxg)/sqrt(length(res_rfxg)), mean(res_rfxg)+1.96*sd(res_rfxg)/sqrt(length(res_rfxg)))
+res_svmxg<- (gdm_vege$vege80-pihat_svmxg)^2
+cv_pi_res[7,] <- c(mean(res_svmxg), mean(res_svmxg)-1.96*sd(res_svmxg)/sqrt(length(res_svmxg)), mean(res_svmxg)+1.96*sd(res_svmxg)/sqrt(length(res_svmxg)))
+res_simple<- (gdm_vege$vege80-pihat_simple)^2
+cv_pi_res[8,] <- c(mean(res_simple), mean(res_simple)-1.96*sd(res_simple)/sqrt(length(res_simple)), mean(res_simple)+1.96*sd(res_simple)/sqrt(length(res_simple)))
+cv_pi_res <- as.data.frame(cv_pi_res)
+colnames(cv_pi_res) <- c("risk","lower","upper")
+cv_pi_res$models <- c("glm+rf+svm+xg", "glm+tuned-rf", "glm+svm","glm+xg","glm+rf+svm","gm+rf+xg","glm+svm+xg", "glm+ranger")
+ggplot(cv_pi_res, aes(x = models, y = risk, ymin = lower, ymax = upper)) +
+  geom_pointrange() + geom_errorbar()+ labs(title='CV error for pi function', x="Models", y="Risk")
+
+# tau0
+cv_tau0_res <- matrix(0, nrow=8, ncol=3)
+res_complex <- (mu_source[,1]-tauhat_complex[,1])^2
+cv_tau0_res[1,] <- c(mean(res_complex), mean(res_complex)-1.96*sd(res_complex)/sqrt(length(res_complex)), mean(res_complex)+1.96*sd(res_complex)/sqrt(length(res_complex)))
+res_rf <- (mu_source[,1]-tauhat_rf[,1])^2
+cv_tau0_res[2,] <- c(mean(res_rf), mean(res_rf)-1.96*sd(res_rf)/sqrt(length(res_rf)), mean(res_rf)+1.96*sd(res_rf)/sqrt(length(res_rf)))
+res_svm <- (mu_source[,1]-tauhat_svm[,1])^2
+cv_tau0_res[3,] <- c(mean(res_svm), mean(res_svm)-1.96*sd(res_svm)/sqrt(length(res_svm)), mean(res_svm)+1.96*sd(res_svm)/sqrt(length(res_svm)))
+res_xg<- (mu_source[,1]-tauhat_xg[,1])^2
+cv_tau0_res[4,] <- c(mean(res_xg), mean(res_xg)-1.96*sd(res_xg)/sqrt(length(res_xg)), mean(res_xg)+1.96*sd(res_xg)/sqrt(length(res_xg)))
+res_rfsvm<- (mu_source[,1]-tauhat_rfsvm[,1])^2
+cv_tau0_res[5,] <- c(mean(res_rfsvm), mean(res_rfsvm)-1.96*sd(res_rfsvm)/sqrt(length(res_rfsvm)), mean(res_rfsvm)+1.96*sd(res_rfsvm)/sqrt(length(res_rfsvm)))
+res_rfxg<- (mu_source[,1]-tauhat_rfxg[,1])^2
+cv_tau0_res[6,] <- c(mean(res_rfxg), mean(res_rfxg)-1.96*sd(res_rfxg)/sqrt(length(res_rfxg)), mean(res_rfxg)+1.96*sd(res_rfxg)/sqrt(length(res_rfxg)))
+res_svmxg<- (mu_source[,1]-tauhat_xgsvm[,1])^2
+cv_tau0_res[7,] <- c(mean(res_svmxg), mean(res_svmxg)-1.96*sd(res_svmxg)/sqrt(length(res_svmxg)), mean(res_svmxg)+1.96*sd(res_svmxg)/sqrt(length(res_svmxg)))
+res_simple<- (mu_source[,1]-tauhat_simple[,1])^2
+cv_tau0_res[8,] <- c(mean(res_simple), mean(res_simple)-1.96*sd(res_simple)/sqrt(length(res_simple)), mean(res_simple)+1.96*sd(res_simple)/sqrt(length(res_simple)))
+cv_tau0_res <- as.data.frame(cv_tau0_res)
+colnames(cv_tau0_res) <- c("risk","lower","upper")
+cv_tau0_res$models <- c("glm+rf+svm+xg", "glm+tuned-rf", "glm+svm","glm+xg","glm+rf+svm","gm+rf+xg","glm+svm+xg", "glm+ranger")
+ggplot(cv_tau0_res, aes(x = models, y = risk, ymin = lower, ymax = upper)) +
+  geom_pointrange() + geom_errorbar()+ labs(title='CV error for tau0 function', x="Models", y="Risk")
+
+# tau1
+cv_tau1_res <- matrix(0, nrow=8, ncol=3)
+res_complex <- (mu_source[,2]-tauhat_complex[,2])^2
+cv_tau1_res[1,] <- c(mean(res_complex), mean(res_complex)-1.96*sd(res_complex)/sqrt(length(res_complex)), mean(res_complex)+1.96*sd(res_complex)/sqrt(length(res_complex)))
+res_rf <- (mu_source[,2]-tauhat_rf[,2])^2
+cv_tau1_res[2,] <- c(mean(res_rf), mean(res_rf)-1.96*sd(res_rf)/sqrt(length(res_rf)), mean(res_rf)+1.96*sd(res_rf)/sqrt(length(res_rf)))
+res_svm <- (mu_source[,2]-tauhat_svm[,2])^2
+cv_tau1_res[3,] <- c(mean(res_svm), mean(res_svm)-1.96*sd(res_svm)/sqrt(length(res_svm)), mean(res_svm)+1.96*sd(res_svm)/sqrt(length(res_svm)))
+res_xg<- (mu_source[,2]-tauhat_xg[,2])^2
+cv_tau1_res[4,] <- c(mean(res_xg), mean(res_xg)-1.96*sd(res_xg)/sqrt(length(res_xg)), mean(res_xg)+1.96*sd(res_xg)/sqrt(length(res_xg)))
+res_rfsvm<- (mu_source[,2]-tauhat_rfsvm[,2])^2
+cv_tau1_res[5,] <- c(mean(res_rfsvm), mean(res_rfsvm)-1.96*sd(res_rfsvm)/sqrt(length(res_rfsvm)), mean(res_rfsvm)+1.96*sd(res_rfsvm)/sqrt(length(res_rfsvm)))
+res_rfxg<- (mu_source[,2]-tauhat_rfxg[,2])^2
+cv_tau1_res[6,] <- c(mean(res_rfxg), mean(res_rfxg)-1.96*sd(res_rfxg)/sqrt(length(res_rfxg)), mean(res_rfxg)+1.96*sd(res_rfxg)/sqrt(length(res_rfxg)))
+res_svmxg<- (mu_source[,2]-tauhat_xgsvm[,2])^2
+cv_tau1_res[7,] <- c(mean(res_svmxg), mean(res_svmxg)-1.96*sd(res_svmxg)/sqrt(length(res_svmxg)), mean(res_svmxg)+1.96*sd(res_svmxg)/sqrt(length(res_svmxg)))
+res_simple<- (mu_source[,2]-tauhat_simple[,2])^2
+cv_tau1_res[8,] <- c(mean(res_simple), mean(res_simple)-1.96*sd(res_simple)/sqrt(length(res_simple)), mean(res_simple)+1.96*sd(res_simple)/sqrt(length(res_simple)))
+cv_tau1_res <- as.data.frame(cv_tau1_res)
+colnames(cv_tau1_res) <- c("risk","lower","upper")
+cv_tau1_res$models <- c("glm+rf+svm+xg", "glm+tuned-rf", "glm+svm","glm+xg","glm+rf+svm","gm+rf+xg","glm+svm+xg", "glm+ranger")
+ggplot(cv_tau1_res, aes(x = models, y = risk, ymin = lower, ymax = upper)) +
+  geom_pointrange() + geom_errorbar()+ labs(title='CV error for tau1 function', x="Models", y="Risk")
+
+# rho
+cv_rho_res <- matrix(0, nrow=8, ncol=3)
+res_complex <- (label-rhohat_complex)^2
+cv_rho_res[1,] <- c(mean(res_complex), mean(res_complex)-1.96*sd(res_complex)/sqrt(length(res_complex)), mean(res_complex)+1.96*sd(res_complex)/sqrt(length(res_complex)))
+res_rf <- (label-rhohat_rf)^2
+cv_rho_res[2,] <- c(mean(res_rf), mean(res_rf)-1.96*sd(res_rf)/sqrt(length(res_rf)), mean(res_rf)+1.96*sd(res_rf)/sqrt(length(res_rf)))
+res_svm <- (label-rhohat_svm)^2
+cv_rho_res[3,] <- c(mean(res_svm), mean(res_svm)-1.96*sd(res_svm)/sqrt(length(res_svm)), mean(res_svm)+1.96*sd(res_svm)/sqrt(length(res_svm)))
+res_xg<- (label-rhohat_xg)^2
+cv_rho_res[4,] <- c(mean(res_xg), mean(res_xg)-1.96*sd(res_xg)/sqrt(length(res_xg)), mean(res_xg)+1.96*sd(res_xg)/sqrt(length(res_xg)))
+res_rfsvm<- (label-rhohat_rfsvm)^2
+cv_rho_res[5,] <- c(mean(res_rfsvm), mean(res_rfsvm)-1.96*sd(res_rfsvm)/sqrt(length(res_rfsvm)), mean(res_rfsvm)+1.96*sd(res_rfsvm)/sqrt(length(res_rfsvm)))
+res_rfxg<- (label-rhohat_rfxg)^2
+cv_rho_res[6,] <- c(mean(res_rfxg), mean(res_rfxg)-1.96*sd(res_rfxg)/sqrt(length(res_rfxg)), mean(res_rfxg)+1.96*sd(res_rfxg)/sqrt(length(res_rfxg)))
+res_svmxg<- (label-rhohat_svmxg)^2
+cv_rho_res[7,] <- c(mean(res_svmxg), mean(res_svmxg)-1.96*sd(res_svmxg)/sqrt(length(res_svmxg)), mean(res_svmxg)+1.96*sd(res_svmxg)/sqrt(length(res_svmxg)))
+res_simple<- (label-rhohat_simple)^2
+cv_rho_res[8,] <- c(mean(res_simple), mean(res_simple)-1.96*sd(res_simple)/sqrt(length(res_simple)), mean(res_simple)+1.96*sd(res_simple)/sqrt(length(res_simple)))
+cv_rho_res <- as.data.frame(cv_rho_res)
+colnames(cv_rho_res) <- c("risk","lower","upper")
+cv_rho_res$models <- c("glm+rf+svm+xg", "glm+tuned-rf", "glm+svm","glm+xg","glm+rf+svm","gm+rf+xg","glm+svm+xg", "glm+ranger")
+ggplot(cv_rho_res, aes(x = models, y = risk, ymin = lower, ymax = upper)) +
+  geom_pointrange() + geom_errorbar()+ labs(title='CV error for rho function', x="Models", y="Risk")
+```
+
+```{r}
+# Choice of the positivity constant
+eps <- seq(from=0.01, to = 0.15, by=0.01)
+result <- matrix(0, nrow=length(eps), ncol=2)
+#models <- list()
+for (i in seq_along(eps)){
+  res <- transport_dr(gdm_vege$vege80, gdm_vege$gdm, gdm_vege[,cova_vege], nsfg, sl.lib.source = c("SL.mean", "SL.ranger", "SL.glmnet"), sl.lib.target = c("SL.mean", "SL.ranger", "SL.glmnet"), 5, epsilon = eps[i], survey = T)
+  #models[[i]] <- res
+  result[i,] <- res[[1]][,3]
+}
+## Number of probbabilities modified
+# rho 2,3,3,6,22,79,127,512,1434,2409,2981,3325,3662,3931,4159
+# pi 3546, 4506, 5003, 5336, 5562, 5750, 5901,6029, 6138,6220,6322,6408,6472,6549,6622
+result <- as.data.frame(result)
+colnames(result) <- c("value","sd")
+result$epsilon <- eps
+ggplot(result, aes(x = epsilon, y = value, ymin = value-1.96*sd, ymax = value+1.96*sd)) +
+  geom_pointrange() + geom_errorbar()+ labs(title='Estimated results for different positivity constant', x="epsilon", y="Effects")
+```
+
+```{r}
+# Effects of potential outliers in the empirical influence functions
+
+participation <- c(rep(1, nrow(gdm_vege)), rep(0, nrow(nsfg)))
+if_outlier <- function(ifs, participation, percent){
+  n_trial_ori <- sum(participation)
+  quantile0 <- quantile(ifs[,1], c(percent, 1-percent))
+  quantile1 <- quantile(ifs[,2], c(percent, 1-percent))
+  retained0 <- ifs[,1] >= quantile0[1] & ifs[,1] <= quantile0[2]
+  retained1 <- ifs[,2] >= quantile1[1] & ifs[,2] <= quantile1[2]
+  retained <- retained0 & retained1
+  retained_target <- retained[(n_trial_ori+1):length(participation)]
+  part_retained <- participation[retained]
+  ifs <- ifs[retained,]
+  n_trial <- sum(part_retained)
+  n_target <- length(part_retained) - n_trial
+  mean_trial0 <- mean(ifs[1:n_trial,1])
+  mean_trial1 <- mean(ifs[1:n_trial,2])
+  mean_trial_diff <- mean(ifs[1:n_trial,2] - ifs[1:n_trial,1])
+  sd_trial0 <- sd(ifs[1:n_trial,1])
+  sd_trial1 <- sd(ifs[1:n_trial,2])
+  sd_trial_diff <- sd(ifs[1:n_trial,2] - ifs[1:n_trial,1])
+  nsfg_design <- 
+    svydesign( 
+        id = ~ nsfg_raw[retained_target,]$SECU , 
+        strata = ~ nsfg_raw[retained_target,]$SEST , 
+        data = nsfg[retained_target,] , 
+        weights = ~ nsfg_raw[retained_target,]$WGT2015_2017 , 
+        nest = TRUE 
+    )
+  nsfg_design <- 
+    update( 
+        nsfg_design , 
+        psi0 = ifs[(n_trial+1):(n_trial+n_target),1],
+        psi1 = ifs[(n_trial+1):(n_trial+n_target),2],
+        effect = ifs[(n_trial+1):(n_trial+n_target),2] -  
+          ifs[(n_trial+1):(n_trial+n_target),1])
+  svy_res0 <- svymean( ~ psi0 , nsfg_design )
+  mean_target0 <- coef(svy_res0)
+  sd_target0 <- SE(svy_res0)
+  svy_res1 <- svymean( ~ psi1 , nsfg_design )
+  mean_target1 <- coef(svy_res1)
+  sd_target1 <- SE(svy_res1)
+  svy_res_diff <- svymean( ~ effect , nsfg_design )
+  mean_target_diff <- coef(svy_res_diff)
+  sd_target_diff <- SE(svy_res_diff)
+  results <- matrix(0, nrow=2, ncol=3)
+  results[1,1] <- n_trial*mean_trial0/(n_trial+n_target) + n_target*mean_target0/(n_trial+n_target)
+  results[1,2] <- n_trial*mean_trial1/(n_trial+n_target) + n_target*mean_target1/(n_trial+n_target)
+  results[1,3] <- n_trial*mean_trial_diff/(n_trial+n_target) + n_target*mean_target_diff/(n_trial+n_target)
+  results[2,1] <- sqrt((n_trial*sd_trial0^2+n_target^2*sd_target0^2)/((n_trial+n_target)^2))
+  results[2,2] <- sqrt((n_trial*sd_trial1^2+n_target^2*sd_target1^2)/((n_trial+n_target)^2))
+  results[2,3] <- sqrt((n_trial*sd_trial_diff^2+n_target^2*sd_target_diff^2)/((n_trial+n_target)^2))
+  return(results)
+}
+percents <- seq(from = 0.004, to=0.014, by = 0.002)
+results_out <- matrix(0, nrow=2, ncol=length(percents))
+for (i in seq_along(percents)){
+  results_out[,i] <- if_outlier(gdm_vege_tran$ifs, participation, percents[i])[,3]
+}
+results_out <- as.data.frame(t(results_out))
+colnames(results_out) <- c("value","sd")
+results_out$quantile <- percents
+ggplot(results_out, aes(x = quantile, y = value, ymin = value-1.96*sd, ymax = value+1.96*sd)) +
+  geom_pointrange() + geom_errorbar()+ labs(title='Estimated results with different number of outliers removed ', x="Quantile", y="Effects")
+```
+
+
+
+```{r}
+# Model selection (not used any more)
+
+# Multiple superlearner train the models
+
+mtry_seq <- seq(from = 3, to = 7, by = 2)
+node_size_seq <- c(5,10,20)
+rf_learners <- create.Learner("SL.ranger", tune = list(mtry = mtry_seq, min.node.size = node_size_seq, replace=c(T,F)))
+depth_seq <- c(4,6,8)
+shrink_seq <- c(0.1, 0.01, 0.001)
+xgboost_learners <- create.Learner("SL.xgboost", tune = list(max_depth = depth_seq, shrinkage=shrink_seq))
+
+
+nu_seq <- c(0.1, 0.3, 0.5, 0.7)
+svm_learners <- create.Learner("SL.svm", tune = list(nu = nu_seq))
+
+SL.lib<- c("SL.mean","SL.glmnet", rf_learners$names, xgboost_learners$names, svm_learners$names)
+
+# Training superlearner using parallel (need to use mcsuperlearner in transport_dr function)
+options(mc.cores = 4)
+
+pre_fruit_tran <- transport_dr(pre_fruit$fruit80, pre_fruit$ptb37, pre_fruit[,cova_fruit], nsfg, sl.lib.source = SL.lib, sl.lib.target = SL.lib, 5, epsilon = 0.01)
+# 0.1211 0.0256
+
+set.seed(521)
+gdm_fruit <- na.omit(numom[,c(cova_fruit, "fruit80", "gdm")])
+gdm_fruit_tran <- transport_dr(gdm_fruit$fruit80, gdm_fruit$gdm, gdm_fruit[,cova_fruit], nsfg, sl.lib.source = SL.lib, sl.lib.target = SL.lib, 5, epsilon = 0.01)
+# -0.005746 0.004403
+
+set.seed(521)
+pree_fruit <- na.omit(numom[,c(cova_fruit, "fruit80", "pree_acog")])
+pree_fruit_tran <- transport_dr(pree_fruit$fruit80, pree_fruit$pree_acog, pree_fruit[,cova_fruit], nsfg, sl.lib.source = SL.lib, sl.lib.target = SL.lib, 5, epsilon = 0.01)
+# 0.02988, 0.0061
+
+
+set.seed(521)
+sga_fruit <- na.omit(numom[,c(cova_fruit, "fruit80", "SGA")])
+sga_fruit_tran <- transport_dr(sga_fruit$fruit80, sga_fruit$SGA, sga_fruit[,cova_fruit], nsfg, sl.lib.source = SL.lib, sl.lib.target = SL.lib, 5, epsilon = 0.01)
+# 0.08092, 0.01088
+
+Effects <- c(0.1211, -0.005746, 0.02988, 0.08092)
+sds <- c(0.0256, 0.004403, 0.0061, 0.01088)
+errbar(1:4, Effects, Effects-sds*1.96, Effects+sds*1.96, add=F,xaxt = "n", main ="Treatmant Effect of Fruit in Target Population", col="red",xlab='Outcomes')
+title("Treatmant Effect of Fruit in Target Population")
+abline(h = 0, lty=2)
+axis(1, at=1:4, labels=c("Preterm Birth","Gestational Diabetes", "Pre-eclampsia", "SGA birth"))
+
+cova_vege <- covariates[-13]
+pre_vege <- na.omit(numom[,c(cova_vege, "vege80", "ptb37")])
+pre_vege_tran <- transport_dr(pre_vege$vege80, pre_vege$ptb37, pre_vege[,cova_vege], nsfg, sl.lib.source = SL.lib, sl.lib.target = SL.lib, 5, epsilon = 0.01)
+# 0.2038, 0.007069
+
+set.seed(123)
+gdm_vege <- na.omit(numom[,c(cova_vege, "vege80", "gdm")])
+gdm_vege_tran <- transport_dr(gdm_vege$vege80, gdm_vege$gdm, gdm_vege[,cova_vege], nsfg, sl.lib.source = SL.lib, sl.lib.target = SL.lib, 5, epsilon = 0.01)
+# 0.0505, 0.003303
+
+pree_vege <- na.omit(numom[,c(cova_vege, "vege80", "pree_acog")])
+pree_vege_tran <- transport_dr(pree_vege$vege80, pree_vege$pree_acog, pree_vege[,cova_vege], nsfg, sl.lib.source = SL.lib, sl.lib.target = SL.lib, 5, epsilon = 0.01)
+# 0.03508,0.007306
+
+sga_vege <- na.omit(numom[,c(cova_vege, "vege80", "SGA")])
+sga_vege_tran <- transport_dr(sga_vege$vege80, sga_vege$SGA, sga_vege[,cova_vege], nsfg, sl.lib.source = SL.lib, sl.lib.target = SL.lib, 5, epsilon = 0.01)
+# 0.21435, 0.00664
+
+Effects <- c(0.2038, 0.0505, 0.03508, 0.21435)
+sds <- c(0.007069, 0.003303, 0.007306, 0.00664)
+errbar(1:4, Effects, Effects-sds*1.96, Effects+sds*1.96, add=F,xaxt = "n", main ="Treatmant Effect of Vegetables in Target Population", col="red",xlab='Outcomes', ylim=c(0,0.25))
+title("Treatmant Effect of Vegetables in Target Population")
+abline(h = 0, lty=2)
+axis(1, at=1:4, labels=c("Preterm Birth","Gestational Diabetes", "Pre-eclampsia", "SGA birth"))
+
+# The most complex one
+mtry_seq <- seq(from = 3, to = 7, by = 2)
+node_size_seq <- c(5,10,20)
+rf_learners <- create.Learner("SL.ranger", tune = list(mtry = mtry_seq, min.node.size = node_size_seq, replace=c(T,F)))
+depth_seq <- c(4,6,8)
+shrink_seq <- c(0.1, 0.01, 0.001)
+xgboost_learners <- create.Learner("SL.xgboost", tune = list(max_depth = depth_seq, shrinkage=shrink_seq))
+nu_seq <- c(0.1, 0.3, 0.5, 0.7)
+svm_learners <- create.Learner("SL.svm", tune = list(nu = nu_seq))
+
+SL.lib<- c("SL.mean","SL.glmnet", rf_learners$names, xgboost_learners$names, svm_learners$names)
+
+options(mc.cores = 4)
+set.seed(1, "L'Ecuyer-CMRG")
+cova_fruit <- covariates[-12]
+pre_fruit <- na.omit(numom[,c(cova_fruit, "fruit80", "ptb37")])
+x_source_aug <- janitor::clean_names(as.data.frame(model.matrix(~-1+., pre_fruit[,cova_fruit])))
+
+set.seed(1, "L'Ecuyer-CMRG")
+cv_mu_complex <- CV.SuperLearner(Y = pre_fruit$ptb37, X = x_source_aug, cvControl = list(V = 10), parallel = "multicore", SL.library = SL.lib)
+# 0.071984, 0.002444
+
+cv_mu_simple <- CV.SuperLearner(Y = pre_fruit$ptb37, X = x_source_aug, cvControl = list(V = 10), parallel = "multicore", SL.library = c("SL.mean","SL.glmnet","SL.ranger"))
+# 0.071804, 0.002504
+# 0.071893, 0.002506
+
+cv_mu_mean <- CV.SuperLearner(Y = pre_fruit$ptb37, X = x_source_aug, cvControl = list(V = 10), parallel = "multicore", SL.library = c("SL.mean"))
+# 0.07226, 0.002543
+# 0.072253, 0.002543
+
+cv_mu_rf <- CV.SuperLearner(Y = pre_fruit$ptb37, X = x_source_aug, cvControl = list(V = 10), parallel = "multicore", SL.library = c("SL.mean","SL.glmnet",rf_learners$names))
+# 0.071952, 0.002508
+# 0.071696, 0.002502
+
+cv_mu_svm <- CV.SuperLearner(Y = pre_fruit$ptb37, X = x_source_aug, cvControl = list(V = 10), parallel = "multicore", SL.library = c("SL.mean","SL.glmnet",svm_learners$names))
+# 0.071919, 0.002517
+# 0.071865, 0.002542
+
+cv_mu_xg <- CV.SuperLearner(Y = pre_fruit$ptb37, X = x_source_aug, cvControl = list(V = 10), parallel = "multicore", SL.library = c("SL.mean","SL.glmnet",xgboost_learners$names))
+# 0.07254, 0.002409
+
+cv_mu_rf_xg <- CV.SuperLearner(Y = pre_fruit$ptb37, X = x_source_aug, cvControl = list(V = 10), parallel = "multicore", SL.library = c("SL.mean","SL.glmnet",rf_learners$names,xgboost_learners$names))
+# 0.071963, 0.0024975
+# 0.07193, 0.0024784
+
+cv_mu_rf_svm <- CV.SuperLearner(Y = pre_fruit$ptb37, X = x_source_aug, cvControl = list(V = 10), parallel = "multicore", SL.library = c("SL.mean","SL.glmnet",rf_learners$names,svm_learners$names))
+# 0.071812 0.0024766
+# 0.071743 0.002492
+
+cv_mu_xg_svm <- CV.SuperLearner(Y = pre_fruit$ptb37, X = x_source_aug, cvControl = list(V = 10), parallel = "multicore", SL.library = c("SL.mean","SL.glmnet",xgboost_learners$names,svm_learners$names))
+# 0.072019, 0.0024372
+# 0.071974, 0.002493
+
+cv_mu <- matrix(0, nrow=8, ncol=3)
+cv_mu[1,] <- c(0.071804, 0.071804-0.002504/sqrt(5), 0.071804+0.002504/sqrt(5))
+cv_mu[2,] <- c(0.071952, 0.071952-0.002508/sqrt(5), 0.071952+0.002508/sqrt(5))
+cv_mu[3,] <- c(0.071919, 0.071919-0.002517/sqrt(5), 0.071919+0.002517/sqrt(5))
+cv_mu[4,] <- c(0.07254, 0.07254-0.002409/sqrt(5), 0.07254+0.002409/sqrt(5))
+cv_mu[5,] <- c(0.071812, 0.071812-0.0024766/sqrt(5), 0.071812+0.0024766/sqrt(5))
+cv_mu[6,] <- c(0.071963, 0.071963-0.0024975/sqrt(5), 0.071963+0.0024975/sqrt(5))
+cv_mu[7,] <- c(0.072019,0.072019-0.0024372/sqrt(5),0.072019+0.0024372/sqrt(5))
+cv_mu[8,] <- c(0.071984,0.071984-0.002444/sqrt(5),0.071984+0.002444/sqrt(5))
+cv_mu <- as.data.frame(cv_mu)
+colnames(cv_mu) <- c("risk","lower","upper")
+cv_mu$models <- c("glm+ranger", "glm+tuned-rf", "glm+svm","glm+xg","glm+rf+svm","glm+rf+xg","glm+svm+xg","glm+rf+svm+xg")
+ggplot(cv_mu, aes(x = models, y = risk, ymin = lower, ymax = upper)) +
+  geom_pointrange() + geom_errorbar()+ labs(title='CV error for mu function', x="Models", y="Risk")
+
+# pi
+set.seed(1, "L'Ecuyer-CMRG")
+cv_pi_complex <- CV.SuperLearner(Y = pre_fruit$fruit80, X = x_source_aug, cvControl = list(V = 5), parallel = "multicore", SL.library = SL.lib, family = "binomial")
+# 0.10936, 0.002235
+
+set.seed(1, "L'Ecuyer-CMRG")
+cv_pi_simple <- CV.SuperLearner(Y = pre_fruit$fruit80, X = x_source_aug, cvControl = list(V = 5), parallel = "multicore", SL.library = c("SL.mean","SL.glmnet","SL.ranger"), family = "binomial")
+# 0.10997, 0.0022055
+
+set.seed(1, "L'Ecuyer-CMRG")
+cv_pi_xg_svm <- CV.SuperLearner(Y = pre_fruit$fruit80, X = x_source_aug, cvControl = list(V = 5), parallel = "multicore", SL.library = c("SL.mean","SL.glmnet",xgboost_learners$names,svm_learners$names), family = "binomial")
+# 0.10932, 0.002235
+
+set.seed(1, "L'Ecuyer-CMRG")
+cv_pi_rf_svm <- CV.SuperLearner(Y = pre_fruit$fruit80, X = x_source_aug, cvControl = list(V = 5), parallel = "multicore", SL.library = c("SL.mean","SL.glmnet",rf_learners$names,svm_learners$names), family = "binomial")
+# 0.1098, 0.002202
+
+set.seed(1, "L'Ecuyer-CMRG")
+cv_pi_rf_xg <- CV.SuperLearner(Y = pre_fruit$fruit80, X = x_source_aug, cvControl = list(V = 5), parallel = "multicore", SL.library = c("SL.mean","SL.glmnet",rf_learners$names, xgboost_learners$names), family = "binomial")
+# 0.10946 0.002246
+
+set.seed(1, "L'Ecuyer-CMRG")
+cv_pi_rf <- CV.SuperLearner(Y = pre_fruit$fruit80, X = x_source_aug, cvControl = list(V = 5), parallel = "multicore", SL.library = c("SL.mean","SL.glmnet",rf_learners$names), family = "binomial")
+# 0.10995 0.002205
+
+set.seed(1, "L'Ecuyer-CMRG")
+cv_pi_svm <- CV.SuperLearner(Y = pre_fruit$fruit80, X = x_source_aug, cvControl = list(V = 5), parallel = "multicore", SL.library = c("SL.mean","SL.glmnet",svm_learners$names), family = "binomial")
+# 0.10970 0.00222
+
+set.seed(1, "L'Ecuyer-CMRG")
+cv_pi_xg <- CV.SuperLearner(Y = pre_fruit$fruit80, X = x_source_aug, cvControl = list(V = 5), parallel = "multicore", SL.library = c("SL.mean","SL.glmnet",xgboost_learners$names), family = "binomial")
+# 0.10948, 0.0022479
+
+cv_pi <- matrix(0, nrow=8, ncol=3)
+cv_pi[1,] <- c(0.10997, 0.10997-0.0022055/sqrt(5), 0.10997+0.0022055/sqrt(5))
+cv_pi[2,] <- c(0.10995, 0.10995-0.002205/sqrt(5), 0.10995+0.002205/sqrt(5))
+cv_pi[3,] <- c(0.10970, 0.10970-0.00222/sqrt(5), 0.10970+0.00222/sqrt(5))
+cv_pi[4,] <- c(0.10948, 0.10948-0.0022479/sqrt(5), 0.10948+0.0022479/sqrt(5))
+cv_pi[5,] <- c(0.1098, 0.1098-0.002202/sqrt(5), 0.1098+0.002202/sqrt(5))
+cv_pi[6,] <- c(0.10946, 0.10946-0.002246/sqrt(5), 0.10946+0.002246/sqrt(5))
+cv_pi[7,] <- c(0.10932,0.10932-0.002235/sqrt(5),0.10932+0.002235/sqrt(5))
+cv_pi[8,] <- c(0.10936,0.10936-0.002235/sqrt(5),0.10936+0.0022354/sqrt(5))
+cv_pi <- as.data.frame(cv_pi)
+colnames(cv_pi) <- c("risk","lower","upper")
+cv_pi$models <- c("glm+ranger", "glm+tuned-rf", "glm+svm","glm+xg","glm+rf+svm","glm+rf+xg","glm+svm+xg","glm+rf+svm+xg")
+ggplot(cv_pi, aes(x = models, y = risk, ymin = lower, ymax = upper)) +
+  geom_pointrange() + geom_errorbar()+ labs(title='CV error for pi function', x="Models", y="Risk")
+
+# rho
+x_target_aug <- janitor::clean_names(as.data.frame(model.matrix(~-1+., nsfg)))
+cova_target_aug <- colnames(x_target_aug)
+data_aug <- rbind(x_source_aug[,cova_target_aug], x_target_aug)
+label <- c(rep(1, nrow(x_source_aug)), rep(0, nrow(x_target_aug)))
+
+set.seed(1, "L'Ecuyer-CMRG")
+cv_rho_simple <- CV.SuperLearner(Y = label, X = data_aug, cvControl = list(V = 5), parallel = "multicore", SL.library = c("SL.mean", "SL.glmnet", "SL.ranger"), family = "binomial")
+# 0.0792 0.001349
+
+set.seed(1, "L'Ecuyer-CMRG")
+cv_rho_complex <- CV.SuperLearner(Y = label, X = data_aug, cvControl = list(V = 5), parallel = "multicore", SL.library = SL.lib, family = "binomial")
+# 0.0792 0.001349
+
+set.seed(1, "L'Ecuyer-CMRG")
+cv_rho_rf <- CV.SuperLearner(Y = label, X = data_aug, cvControl = list(V = 5), parallel = "multicore", SL.library = c("SL.mean","SL.glmnet",rf_learners$names), family = "binomial")
+# 0.0793 0.001342
+
+set.seed(1, "L'Ecuyer-CMRG")
+cv_rho_svm <- CV.SuperLearner(Y = label, X = data_aug, cvControl = list(V = 5), parallel = "multicore", SL.library = c("SL.mean","SL.glmnet",svm_learners$names), family = "binomial")
+# 0.08324, 0.001371
+
+set.seed(1, "L'Ecuyer-CMRG")
+cv_rho_xg <- CV.SuperLearner(Y = label, X = data_aug, cvControl = list(V = 5), parallel = "multicore", SL.library = c("SL.mean","SL.glmnet",xgboost_learners$names), family = "binomial")
+# 0.07982, 0.001379
+
+set.seed(1, "L'Ecuyer-CMRG")
+cv_rho_rf_svm <- CV.SuperLearner(Y = label, X = data_aug, cvControl = list(V = 5), parallel = "multicore", SL.library = c("SL.mean","SL.glmnet", rf_learners$names, svm_learners$names), family = "binomial")
+# 0.079339, 0.001343
+
+set.seed(1, "L'Ecuyer-CMRG")
+cv_rho_rf_xg <- CV.SuperLearner(Y = label, X = data_aug, cvControl = list(V = 5), parallel = "multicore", SL.library = c("SL.mean","SL.glmnet", rf_learners$names, xgboost_learners$names), family = "binomial")
+# 0.079201, 0.0013498
+
+set.seed(1, "L'Ecuyer-CMRG")
+cv_rho_svm_xg <- CV.SuperLearner(Y = label, X = data_aug, cvControl = list(V = 5), parallel = "multicore", SL.library = c("SL.mean","SL.glmnet", xgboost_learners$names, svm_learners$names), family = "binomial")
+# 0.079783 0.0013666
+
+cv_rho <- matrix(0, nrow=8, ncol=3)
+cv_rho[1,] <- c(0.0792, 0.0792-0.001349/sqrt(5), 0.0792+0.001349/sqrt(5))
+cv_rho[2,] <- c(0.0793, 0.0793-0.001342/sqrt(5), 0.0793+0.001342/sqrt(5))
+cv_rho[3,] <- c(0.08324, 0.08324-0.001371/sqrt(5), 0.08324+0.001371/sqrt(5))
+cv_rho[4,] <- c(0.07982, 0.07982-0.001379/sqrt(5), 0.07982+0.001379/sqrt(5))
+cv_rho[5,] <- c(0.079339, 0.079339-0.001343/sqrt(5), 0.079339+0.001343/sqrt(5))
+cv_rho[6,] <- c(0.079201, 0.079201-0.0013498/sqrt(5), 0.079201+0.0013498/sqrt(5))
+cv_rho[7,] <- c(0.079783,0.079783-0.0013666/sqrt(5),0.079783+0.0013666/sqrt(5))
+cv_rho[8,] <- c(0.0792,0.0792-0.001349/sqrt(5),0.0792+0.001349/sqrt(5))
+cv_rho <- as.data.frame(cv_rho)
+colnames(cv_rho) <- c("risk","lower","upper")
+cv_rho$models <- c("glm+ranger", "glm+tuned-rf", "glm+svm","glm+xg","glm+rf+svm","glm+rf+xg","glm+svm+xg","glm+rf+svm+xg")
+ggplot(cv_rho, aes(x = models, y = risk, ymin = lower, ymax = upper)) +
+  geom_pointrange() + geom_errorbar()+ labs(title='CV error for rho function', x="Models", y="Risk")
+
+# Tau
+
+# Sample splitting?
+idx <- sample(1:2, nrow(x_source_aug), replace=T)
+train <- idx == 1
+test <- idx == 2
+mufit <- mcSuperLearner(pre_fruit$ptb37[train],
+        x_source_aug[train,], newX= x_source_aug[test,], SL.library=c("SL.mean", "SL.glmnet", "SL.ranger"))
+mufit_val <- mufit$SL.predict
+
+set.seed(1, "L'Ecuyer-CMRG")
+cv_tau_simple <- CV.SuperLearner(Y = mufit_val, X = x_source_aug[test, cova_target_aug], cvControl = list(V = 5), parallel = "multicore", SL.library = c("SL.mean","SL.glmnet","SL.ranger"))
+# 0.0007311, 2.3876e-05
+
+# Not split
+set.seed(1, "L'Ecuyer-CMRG")
+mufit <- mcSuperLearner(pre_fruit$ptb37,
+        x_source_aug, SL.library=c("SL.mean", "SL.glmnet", "SL.ranger"))
+mufit_val <- mufit$SL.predict
+
+set.seed(1, "L'Ecuyer-CMRG")
+cv_tau_simple <- CV.SuperLearner(Y = mufit_val, X = x_source_aug[, cova_target_aug], cvControl = list(V = 5), parallel = "multicore", SL.library = c("SL.mean","SL.glmnet","SL.ranger"))
+# 0.001155, 3.8910e-05
+
+set.seed(1, "L'Ecuyer-CMRG")
+cv_tau_complex <- CV.SuperLearner(Y = mufit_val, X = x_source_aug[, cova_target_aug], cvControl = list(V = 5), parallel = "multicore", SL.library = SL.lib)
+# 0.001182, 4.3014e-05
+
+set.seed(1, "L'Ecuyer-CMRG")
+cv_tau_rf <- CV.SuperLearner(Y = mufit_val, X = x_source_aug[, cova_target_aug], cvControl = list(V = 5), parallel = "multicore", SL.library = c("SL.mean","SL.glmnet",rf_learners$names))
+# 0.0011153, 3.8818e-05
+
+set.seed(1, "L'Ecuyer-CMRG")
+cv_tau_svm <- CV.SuperLearner(Y = mufit_val, X = x_source_aug[, cova_target_aug], cvControl = list(V = 5), parallel = "multicore", SL.library = c("SL.mean","SL.glmnet",svm_learners$names))
+# 0.0011903, 4.3639e-05
+
+set.seed(1, "L'Ecuyer-CMRG")
+cv_tau_xg <- CV.SuperLearner(Y = mufit_val, X = x_source_aug[, cova_target_aug], cvControl = list(V = 5), parallel = "multicore", SL.library = c("SL.mean","SL.glmnet",xgboost_learners$names))
+# 0.001153, 3.8744e-05
+
+set.seed(1, "L'Ecuyer-CMRG")
+cv_tau_rf_svm <- CV.SuperLearner(Y = mufit_val, X = x_source_aug[, cova_target_aug], cvControl = list(V = 5), parallel = "multicore", SL.library = c("SL.mean","SL.glmnet",rf_learners$names, svm_learners$names))
+# 0.001183, 4.3184e-05
+
+set.seed(1, "L'Ecuyer-CMRG")
+cv_tau_rf_xg <- CV.SuperLearner(Y = mufit_val, X = x_source_aug[, cova_target_aug], cvControl = list(V = 5), parallel = "multicore", SL.library = c("SL.mean","SL.glmnet",rf_learners$names, xgboost_learners$names))
+# 0.001152, 3.8765e-05
+
+set.seed(1, "L'Ecuyer-CMRG")
+cv_tau_svm_xg <- CV.SuperLearner(Y = mufit_val, X = x_source_aug[, cova_target_aug], cvControl = list(V = 5), parallel = "multicore", SL.library = c("SL.mean","SL.glmnet",xgboost_learners$names, svm_learners$names))
+# 0.001183, 4.3131e-05
+
+cv_tau <- matrix(0, nrow=8, ncol=3)
+cv_tau[1,] <- c(0.001155, 0.001155-3.8910e-05/sqrt(5), 0.001155+3.8910e-05/sqrt(5))
+cv_tau[2,] <- c(0.0011153, 0.0011153-3.8818e-05/sqrt(5), 0.0011153+3.8818e-05/sqrt(5))
+cv_tau[3,] <- c(0.0011903, 0.0011903-4.3639e-05/sqrt(5), 0.0011903+4.3639e-05/sqrt(5))
+cv_tau[4,] <- c(0.001153, 0.001153-3.8744e-05/sqrt(5), 0.001153+3.8744e-05/sqrt(5))
+cv_tau[5,] <- c(0.001183, 0.001183-4.3184e-05/sqrt(5), 0.001183+4.3184e-05/sqrt(5))
+cv_tau[6,] <- c(0.001152, 0.001152-3.8765e-05/sqrt(5), 0.001152+3.8765e-05/sqrt(5))
+cv_tau[7,] <- c(0.001183, 0.001183-4.3131e-05/sqrt(5), 0.001183+4.3131e-05/sqrt(5))
+cv_tau[8,] <- c(0.001182, 0.001182-4.3014e-05/sqrt(5), 0.001182+4.3014e-05/sqrt(5))
+cv_tau <- as.data.frame(cv_tau)
+colnames(cv_tau) <- c("risk","lower","upper")
+cv_tau$models <- c("glm+ranger", "glm+tuned-rf", "glm+svm","glm+xg","glm+rf+svm","glm+rf+xg","glm+svm+xg","glm+rf+svm+xg")
+ggplot(cv_tau, aes(x = models, y = risk, ymin = lower, ymax = upper)) +
+  geom_pointrange() + geom_errorbar()+ labs(title='CV error for tau function', x="Models", y="Risk")
+```
+
+
+
+
+
+
